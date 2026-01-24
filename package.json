@@ -18,6 +18,16 @@
         "title": "Hello World"
       },
       {
+        "command": "pr-notes.processAudio",
+        "title": "Process Audio for Speaker Diarization",
+        "category": "PR Notes"
+      },
+      {
+        "command": "pr-notes.checkHealth",
+        "title": "Check Diarization Service Health",
+        "category": "PR Notes"
+      },
+      {
         "command": "pr-notes.showMenu",
         "title": "Show Recording Menu",
         "icon": "$(mic)"
@@ -34,6 +44,16 @@
     "configuration": {
       "title": "PR Notes",
       "properties": {
+        "pr-notes.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Base URL for the speaker diarization API service"
+        },
+        "pr-notes.timeout": {
+          "type": "number",
+          "default": 300000,
+          "description": "Timeout for API requests in milliseconds (default: 5 minutes)"
+        },
         "pr-notes.inputDevice": {
           "type": "string",
           "default": "default",
