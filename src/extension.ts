@@ -4,6 +4,7 @@ import * as path from 'path';
 import {spawn, ChildProcess} from 'child_process';
 import { createStatusBarItem, updateStatusBar, showStatusBarMenu, StatusBarCallbacks } from './statusBar';
 import { getSelectedDevice, selectAudioDevice, listAudioDevices } from './audioDeviceManager';
+import { ContextCollector, RecordingContext } from './contextCollector';
 
 const TRANSCRIPTION_SERVER_URL = 'http://localhost:3000';
 
@@ -13,10 +14,12 @@ export function activate(context: vscode.ExtensionContext) {
 
 	let serverProcess: ChildProcess | null = null;
 	let isRecording = false;
+	const contextCollector = new ContextCollector();
+	let pendingContext: RecordingContext[] | null = null;
 
 	const commentController = vscode.comments.createCommentController('pr-notes-comments', 'PR Notes');
 
-	// Create status bar item using module
+	// Create status bar item 
 	const statusBarItem = createStatusBarItem();
 	statusBarItem.command = "pr-notes.showMenu";
 
@@ -59,6 +62,13 @@ export function activate(context: vscode.ExtensionContext) {
 		commentController.createCommentThread(document.uri, range, [comment]);
 	}
 
+	interface WordInfo {
+		word: string;
+		speakerTag: number;
+		startOffset: string;
+		endOffset: string;
+	}
+
 	async function transcribeAudio(audioData: Buffer, audioFilePath: string): Promise<string> {
 		const audioBase64 = audioData.toString('base64');
 		
@@ -74,17 +84,33 @@ export function activate(context: vscode.ExtensionContext) {
 			});
 
 			if (!response.ok) {
-				const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+				const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
 				throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
 			}
 
-			const data = await response.json();
+			const data = await response.json() as { words?: WordInfo[] };
 			
-			if (!data.transcript) {
-				throw new Error('No transcript in response');
+			if (!data.words || !Array.isArray(data.words)) {
+				throw new Error('No words array in response');
 			}
 
-			return data.transcript;
+			// Format words with speaker labels
+			const words: WordInfo[] = data.words;
+			let formattedTranscript = '';
+			let currentSpeaker = -1;
+
+			for (const wordInfo of words) {
+				if (currentSpeaker !== wordInfo.speakerTag) {
+					if (formattedTranscript) {
+						formattedTranscript += '\n\n';
+					}
+					formattedTranscript += `**Speaker ${wordInfo.speakerTag}:** `;
+					currentSpeaker = wordInfo.speakerTag;
+				}
+				formattedTranscript += wordInfo.word + ' ';
+			}
+
+			return formattedTranscript.trim();
 		} catch (error) {
 			if (error instanceof TypeError && error.message.includes('fetch')) {
 				throw new Error('Failed to connect to transcription server. Make sure the Docker container is running on port 3000.');
@@ -108,6 +134,11 @@ export function activate(context: vscode.ExtensionContext) {
 			console.log(`Server process exited with code ${code}, Signal: ${signal}`);
 			serverProcess = null;
 			isRecording = false;
+			// Clean up context collector if recording was interrupted
+			if (pendingContext === null) {
+				contextCollector.clear();
+			}
+			pendingContext = null;
 			refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 		});
 
@@ -131,6 +162,17 @@ export function activate(context: vscode.ExtensionContext) {
 				await vscode.workspace.fs.writeFile(fileUri, audioData);
 				
 				vscode.window.showInformationMessage(`Recording saved: ${fileName}`);
+
+				// Save context file 
+				if (pendingContext && pendingContext.length > 0) {
+					const contextFileName = fileName.replace('.wav', '.context.json');
+					const contextUri = vscode.Uri.joinPath(recordingsUri, contextFileName);
+					const contextJson = JSON.stringify(pendingContext, null, 2);
+					const contextBuffer = Buffer.from(contextJson, 'utf8');
+					await vscode.workspace.fs.writeFile(contextUri, contextBuffer);
+					console.log(`Context saved: ${contextFileName}`);
+				}
+				pendingContext = null;
 				
 				// Transcribe the audio
 				try {
@@ -161,6 +203,10 @@ export function activate(context: vscode.ExtensionContext) {
 			console.error('Failed to start server process:', err);
 			serverProcess = null;
 			isRecording = false;
+			if (pendingContext === null) {
+				contextCollector.clear();
+			}
+			pendingContext = null;
 			refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 		});
 
@@ -178,6 +224,7 @@ export function activate(context: vscode.ExtensionContext) {
 		startServer();
 		
 		const selectedDevice = getSelectedDevice();
+		contextCollector.startRecording();
 		
 		// Wait then send start 
 		setTimeout(async () => {
@@ -193,6 +240,9 @@ export function activate(context: vscode.ExtensionContext) {
 		if (!isRecording || !serverProcess || !serverProcess.send) {
 			return; // Not recording
 		}
+
+		// Stop context collection and store the context
+		pendingContext = contextCollector.stopRecording();
 
 		serverProcess.send({ command: 'stop' });
 	}

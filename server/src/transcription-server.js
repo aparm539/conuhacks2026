@@ -28,7 +28,7 @@ function initializeSpeechClient() {
             private_key: privateKey,
         },
     });
-    console.log('Google Cloud Speech client initialized');
+    console.log('Google Cloud Speech client initialized. big things are in the console.');
 }
 initializeSpeechClient();
 app.post('/transcribe', async (req, res) => {
@@ -46,10 +46,17 @@ app.post('/transcribe', async (req, res) => {
         }
         // Convert base64 string to Buffer
         const audioBuffer = Buffer.from(audio, 'base64');
+        const diarizationConfig = {
+            enableSpeakerDiarization: true,
+            minSpeakerCount: 1,
+            maxSpeakerCount: 10,
+        };
         const config = {
             encoding: 'LINEAR16',
             sampleRateHertz: 16000,
             languageCode: 'en-US',
+            diarizationConfig: diarizationConfig,
+            enableWordTimeOffsets: true,
         };
         const audioConfig = {
             content: audioBuffer,
@@ -64,11 +71,35 @@ app.post('/transcribe', async (req, res) => {
                 error: 'No transcription results returned from Google Cloud Speech API'
             });
         }
-        // Extract transcript from results
-        const transcript = response.results
-            .map((result) => result.alternatives?.[0]?.transcript || '')
-            .join(' ');
-        res.json({ transcript });
+        // Extract words from the last result (speaker tags only appear in the final result)
+        const lastResult = response.results[response.results.length - 1];
+        const alternative = lastResult.alternatives?.[0];
+        if (!alternative || !alternative.words) {
+            return res.status(404).json({
+                error: 'No words found in transcription results'
+            });
+        }
+        // Helper function to format Duration to string (e.g., "1.100s")
+        const formatDuration = (duration) => {
+            if (!duration)
+                return '0s';
+            const seconds = duration.seconds || 0;
+            const nanos = duration.nanos || 0;
+            const totalSeconds = Number(seconds) + (nanos / 1000000000);
+            // Format with up to 3 decimal places if needed
+            if (totalSeconds === Math.floor(totalSeconds)) {
+                return `${totalSeconds}s`;
+            }
+            return `${totalSeconds.toFixed(3)}s`;
+        };
+        // Map words to include speaker tags and timestamps
+        const words = alternative.words.map((wordInfo) => ({
+            word: wordInfo.word || '',
+            speakerTag: wordInfo.speakerTag || 0,
+            startOffset: formatDuration(wordInfo.startTime),
+            endOffset: formatDuration(wordInfo.endTime),
+        }));
+        res.json({ words });
     }
     catch (error) {
         console.error('Transcription error:', error);
