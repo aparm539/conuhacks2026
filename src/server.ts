@@ -4,14 +4,18 @@ let recorder: any = null;
 let stream: any = null;
 const chunks: any[] = [];
 
-function startRecording() {
+function startRecording(device?: string) {
     if (recorder) {
         console.log("Already recording");
         return;
     }
     // TODO: prevent recording from starting if there is audio that has not been saved to file
     console.log("Starting recording");
-    recorder = new AudioRecorder({ program: 'sox', silence: 0 }, console);
+    const options: any = { program: 'sox', silence: 0 };
+    if (device) {
+        options.device = device;
+    }
+    recorder = new AudioRecorder(options, console);
     chunks.length = 0; 
     
     stream = recorder.start().stream();
@@ -53,9 +57,9 @@ function stopRecording() {
 }
 
 // Listen for messages from parent
-process.on('message', (msg: { command: string }) => {
+process.on('message', (msg: { command: string; device?: string }) => {
     if (msg.command === 'start') {
-        startRecording();
+        startRecording(msg.device);
     } else if (msg.command === 'stop') {
         stopRecording();
     }

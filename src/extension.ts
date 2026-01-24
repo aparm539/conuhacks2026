@@ -1,9 +1,9 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
 import * as path from 'path';
 
 import {spawn, ChildProcess} from 'child_process';
+import { createStatusBarItem, updateStatusBar, showStatusBarMenu, StatusBarCallbacks } from './statusBar';
+import { getSelectedDevice, selectAudioDevice, listAudioDevices } from './audioDeviceManager';
 
 const TRANSCRIPTION_SERVER_URL = 'http://localhost:3000';
 
@@ -16,27 +16,26 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const commentController = vscode.comments.createCommentController('pr-notes-comments', 'PR Notes');
 
-	// Create status bar item
-	const statusBarItem = vscode.window.createStatusBarItem(
-		vscode.StatusBarAlignment.Right,
-		100
-	);
-	statusBarItem.text = "$(mic) Record";
-	statusBarItem.tooltip = "Start Recording";
-	statusBarItem.command = "pr-notes.startRecording";
-	statusBarItem.show();
+	// Create status bar item using module
+	const statusBarItem = createStatusBarItem();
+	statusBarItem.command = "pr-notes.showMenu";
 
-	function updateStatusBar() {
-		if (isRecording) {
-			statusBarItem.text = "$(primitive-square) Recording";
-			statusBarItem.tooltip = "Stop Recording";
-			statusBarItem.command = "pr-notes.stopRecording";
-		} else {
-			statusBarItem.text = "$(mic) Record";
-			statusBarItem.tooltip = "Start Recording";
-			statusBarItem.command = "pr-notes.startRecording";
+	async function refreshStatusBar() {
+		const selectedDeviceId = getSelectedDevice();
+		let deviceDisplayName: string | undefined = undefined;
+		
+		if (selectedDeviceId && selectedDeviceId !== 'default') {
+			// Look up device name from the device list
+			const devices = await listAudioDevices();
+			const device = devices.find(d => d.id === selectedDeviceId);
+			deviceDisplayName = device?.name;
 		}
+		
+		updateStatusBar(statusBarItem, isRecording, deviceDisplayName);
 	}
+
+	// Initial status bar update
+	refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 
 	function createComment(transcript: string) {
 		const editor = vscode.window.activeTextEditor;
@@ -109,7 +108,7 @@ export function activate(context: vscode.ExtensionContext) {
 			console.log(`Server process exited with code ${code}, Signal: ${signal}`);
 			serverProcess = null;
 			isRecording = false;
-			updateStatusBar();
+			refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 		});
 
 		serverProcess.on('message', async (message: { type: string; data: string }) => {
@@ -154,7 +153,7 @@ export function activate(context: vscode.ExtensionContext) {
 				}
 				
 				isRecording = false;
-				updateStatusBar();
+				refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 			}
 		});
 
@@ -162,7 +161,7 @@ export function activate(context: vscode.ExtensionContext) {
 			console.error('Failed to start server process:', err);
 			serverProcess = null;
 			isRecording = false;
-			updateStatusBar();
+			refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 		});
 
 		// Capture stdout, shown in debug console
@@ -171,29 +170,65 @@ export function activate(context: vscode.ExtensionContext) {
 		});
 	}
 
-	const startDisposable = vscode.commands.registerCommand('pr-notes.startRecording', () => {
+	function handleStartRecording() {
 		if (isRecording) {
 			return;
 		}
 
 		startServer();
 		
-		// Wait then send start command
-		setTimeout(() => {
+		const selectedDevice = getSelectedDevice();
+		
+		// Wait then send start 
+		setTimeout(async () => {
 			if (serverProcess && serverProcess.send) {
-				serverProcess.send({ command: 'start' });
+				serverProcess.send({ command: 'start', device: selectedDevice });
 				isRecording = true;
-				updateStatusBar();
+				await refreshStatusBar();
 			}
 		}, 100);
-	});
+	}
 
-	const stopDisposable = vscode.commands.registerCommand('pr-notes.stopRecording', () => {
+	function handleStopRecording() {
 		if (!isRecording || !serverProcess || !serverProcess.send) {
 			return; // Not recording
 		}
 
 		serverProcess.send({ command: 'stop' });
+	}
+
+	async function handleSelectDevice(): Promise<void> {
+		const selectedDeviceId = await selectAudioDevice();
+		if (selectedDeviceId) {
+			await refreshStatusBar();
+			// Look up device name for the message
+			const devices = await listAudioDevices();
+			const device = devices.find(d => d.id === selectedDeviceId);
+			const deviceName = device?.name || selectedDeviceId;
+			vscode.window.showInformationMessage(`Audio input device set to: ${deviceName}`);
+		}
+	}
+
+	// Status bar menu command
+	const showMenuDisposable = vscode.commands.registerCommand('pr-notes.showMenu', async () => {
+		const selectedDeviceId = getSelectedDevice();
+		let deviceDisplayName: string | undefined = undefined;
+		
+		if (selectedDeviceId && selectedDeviceId !== 'default') {
+			// Look up device name from the device list
+			const devices = await listAudioDevices();
+			const device = devices.find(d => d.id === selectedDeviceId);
+			deviceDisplayName = device?.name;
+		}
+
+		const callbacks: StatusBarCallbacks = {
+			onStartRecording: handleStartRecording,
+			onStopRecording: handleStopRecording,
+			onSelectDevice: handleSelectDevice
+		};
+
+		await showStatusBarMenu(isRecording, deviceDisplayName, callbacks);
+		await refreshStatusBar();
 	});
 
 	// The command has been defined in the package.json file
@@ -207,8 +242,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(statusBarItem);
 	context.subscriptions.push(commentController);
-	context.subscriptions.push(startDisposable);
-	context.subscriptions.push(stopDisposable);
+	context.subscriptions.push(showMenuDisposable);
 	context.subscriptions.push(helloWorldDisposable);
 }
 

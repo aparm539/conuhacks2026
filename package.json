@@ -18,6 +18,11 @@
         "title": "Hello World"
       },
       {
+        "command": "pr-notes.showMenu",
+        "title": "Show Recording Menu",
+        "icon": "$(mic)"
+      },
+      {
         "command": "pr-notes.startRecording",
         "title": "Start Recording"
       },
@@ -25,7 +30,17 @@
         "command": "pr-notes.stopRecording",
         "title": "Stop Recording"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "PR Notes",
+      "properties": {
+        "pr-notes.inputDevice": {
+          "type": "string",
+          "default": "default",
+          "description": "Selected audio input device ID for recording. Use 'default' for system default device."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "pnpm run compile",
