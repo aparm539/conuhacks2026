@@ -1,0 +1,24 @@
+{
+  "name": "transcription-server",
+  "version": "1.0.0",
+  "description": "Transcription server for Google Cloud Speech-to-Text API",
+  "main": "dist/transcription-server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/transcription-server.js",
+    "dev": "ts-node src/transcription-server.ts"
+  },
+  "dependencies": {
+    "@google-cloud/speech": "^7.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "22.x",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
