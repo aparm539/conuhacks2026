@@ -55,7 +55,9 @@ export class DiarizationApiClient {
                 // In VS Code extension context, we'll need to use vscode.workspace.fs
                 const fileData = await vscode.workspace.fs.readFile(vscode.Uri.file(audioFile));
                 const fileName = audioFile.split(/[/\\]/).pop() || 'audio.wav';
-                const blob = new Blob([fileData], { type: 'audio/wav' });
+                // Convert Uint8Array to ArrayBuffer for Blob constructor
+                const arrayBuffer = fileData.buffer.slice(fileData.byteOffset, fileData.byteOffset + fileData.byteLength) as ArrayBuffer;
+                const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
                 formData.append('audio', blob, fileName);
             } else {
                 // It's already a File or Blob

@@ -1,0 +1,66 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# VS Code files
+.vscode
+*.code-workspace
+
+# Node modules and build artifacts
+node_modules
+out
+dist
+*.tsbuildinfo
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+
+# Environment files
+.env
+.env.local
+.venv
+venv/
+
+# IDE files
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+!docker/README.md
+
+# Test files
+tests/
+*.test.ts
+*.test.js
+
+# Lock files
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# TypeScript config
+tsconfig.json
+
+# ESLint config
+eslint.config.mjs
+
+# Cache directories
+.cache
+*.cache
