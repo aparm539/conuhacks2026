@@ -5,6 +5,7 @@ import {spawn, ChildProcess} from 'child_process';
 import { createStatusBarItem, updateStatusBar, showStatusBarMenu, StatusBarCallbacks } from './statusBar';
 import { getSelectedDevice, selectAudioDevice, listAudioDevices } from './audioDeviceManager';
 import { ContextCollector, RecordingContext } from './contextCollector';
+import { WordInfo, SpeakerSegment, ClassifiedSegment, TransformedSegment, groupWordsBySpeaker, findCommentLocation } from './speechAlignment';
 
 const TRANSCRIPTION_SERVER_URL = 'http://localhost:3000';
 
@@ -40,7 +41,7 @@ export function activate(context: vscode.ExtensionContext) {
 	// Initial status bar update
 	refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 
-	function createComment(transcript: string) {
+	async function createComments(transformedSegments: TransformedSegment[], contexts: RecordingContext[]): Promise<void> {
 		const editor = vscode.window.activeTextEditor;
 		if (!editor) {
 			vscode.window.showWarningMessage('No active editor found. Please open a file to add comments.');
@@ -48,28 +49,50 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 
 		const document = editor.document;
-		const firstLine = document.lineAt(0);
-		const range = new vscode.Range(0, 0, 0, firstLine.text.length);
+		
+		// Get current file path for context matching
+		let currentFile: string | undefined;
+		if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+			currentFile = vscode.workspace.asRelativePath(document.uri, false);
+		} else {
+			currentFile = document.uri.fsPath;
+		}
 
-		// Create a comment with the transcript text
-		const comment: vscode.Comment = {
-			body: new vscode.MarkdownString(transcript),
-			mode: vscode.CommentMode.Preview,
-			author: { name: 'PR Notes' }
-		};
+		// Filter out Ignore segments (safety check - server already filters them)
+		const segmentsToComment = transformedSegments.filter(seg => seg.classification !== 'Ignore');
 
-		// Create comment thread on the first line
-		commentController.createCommentThread(document.uri, range, [comment]);
+		if (segmentsToComment.length === 0) {
+			vscode.window.showWarningMessage('No speech segments found to create comments.');
+			return;
+		}
+
+		// Create a comment for each transformed segment
+		for (const segment of segmentsToComment) {
+			// Find best location for comment using Gemini API
+			const range = await findCommentLocation(
+				segment,
+				contexts,
+				document,
+				currentFile || '',
+				TRANSCRIPTION_SERVER_URL
+			);
+
+			// Format comment text with speaker label using transformed text
+			const commentText = `**Speaker ${segment.speakerTag}:** ${segment.transformedText}`;
+
+			// Create comment
+			const comment: vscode.Comment = {
+				body: new vscode.MarkdownString(commentText),
+				mode: vscode.CommentMode.Preview,
+				author: { name: 'PR Notes' }
+			};
+
+			// Create comment thread at the determined location
+			commentController.createCommentThread(document.uri, range, [comment]);
+		}
 	}
 
-	interface WordInfo {
-		word: string;
-		speakerTag: number;
-		startOffset: string;
-		endOffset: string;
-	}
-
-	async function transcribeAudio(audioData: Buffer, audioFilePath: string): Promise<string> {
+	async function transcribeAudio(audioData: Buffer, audioFilePath: string): Promise<WordInfo[]> {
 		const audioBase64 = audioData.toString('base64');
 		
 		try {
@@ -94,23 +117,103 @@ export function activate(context: vscode.ExtensionContext) {
 				throw new Error('No words array in response');
 			}
 
-			// Format words with speaker labels
-			const words: WordInfo[] = data.words;
-			let formattedTranscript = '';
-			let currentSpeaker = -1;
+			return data.words;
+		} catch (error) {
+			if (error instanceof TypeError && error.message.includes('fetch')) {
+				throw new Error('Failed to connect to transcription server. Make sure the Docker container is running on port 3000.');
+			}
+			throw error;
+		}
+	}
 
-			for (const wordInfo of words) {
-				if (currentSpeaker !== wordInfo.speakerTag) {
-					if (formattedTranscript) {
-						formattedTranscript += '\n\n';
-					}
-					formattedTranscript += `**Speaker ${wordInfo.speakerTag}:** `;
-					currentSpeaker = wordInfo.speakerTag;
-				}
-				formattedTranscript += wordInfo.word + ' ';
+	async function classifySegments(segments: SpeakerSegment[]): Promise<ClassifiedSegment[]> {
+		try {
+			const response = await fetch(`${TRANSCRIPTION_SERVER_URL}/classify`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({
+					segments: segments,
+				}),
+			});
+
+			if (!response.ok) {
+				const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
+				throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
 			}
 
-			return formattedTranscript.trim();
+			const data = await response.json() as { classifiedSegments?: ClassifiedSegment[] };
+			
+			if (!data.classifiedSegments || !Array.isArray(data.classifiedSegments)) {
+				throw new Error('No classifiedSegments array in response');
+			}
+
+			return data.classifiedSegments;
+		} catch (error) {
+			if (error instanceof TypeError && error.message.includes('fetch')) {
+				throw new Error('Failed to connect to transcription server. Make sure the Docker container is running on port 3000.');
+			}
+			throw error;
+		}
+	}
+
+	async function transformSegments(classifiedSegments: ClassifiedSegment[]): Promise<TransformedSegment[]> {
+		try {
+			const response = await fetch(`${TRANSCRIPTION_SERVER_URL}/transform`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({
+					classifiedSegments: classifiedSegments,
+				}),
+			});
+
+			if (!response.ok) {
+				const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
+				throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+			}
+
+			const data = await response.json() as { transformedSegments?: TransformedSegment[] };
+			
+			if (!data.transformedSegments || !Array.isArray(data.transformedSegments)) {
+				throw new Error('No transformedSegments array in response');
+			}
+
+			return data.transformedSegments;
+		} catch (error) {
+			if (error instanceof TypeError && error.message.includes('fetch')) {
+				throw new Error('Failed to connect to transcription server. Make sure the Docker container is running on port 3000.');
+			}
+			throw error;
+		}
+	}
+
+	async function splitSegments(classifiedSegments: ClassifiedSegment[]): Promise<ClassifiedSegment[]> {
+		try {
+			const response = await fetch(`${TRANSCRIPTION_SERVER_URL}/split`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({
+					classifiedSegments: classifiedSegments,
+				}),
+			});
+
+			if (!response.ok) {
+				const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
+				throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+			}
+
+			const data = await response.json() as { splitSegments?: ClassifiedSegment[] };
+			
+			if (!data.splitSegments || !Array.isArray(data.splitSegments)) {
+				throw new Error('No splitSegments array in response');
+			}
+
+			return data.splitSegments;
 		} catch (error) {
 			if (error instanceof TypeError && error.message.includes('fetch')) {
 				throw new Error('Failed to connect to transcription server. Make sure the Docker container is running on port 3000.');
@@ -164,6 +267,7 @@ export function activate(context: vscode.ExtensionContext) {
 				vscode.window.showInformationMessage(`Recording saved: ${fileName}`);
 
 				// Save context file 
+				const contextsToUse = pendingContext; // Store before clearing
 				if (pendingContext && pendingContext.length > 0) {
 					const contextFileName = fileName.replace('.wav', '.context.json');
 					const contextUri = vscode.Uri.joinPath(recordingsUri, contextFileName);
@@ -176,18 +280,68 @@ export function activate(context: vscode.ExtensionContext) {
 				
 				// Transcribe the audio
 				try {
-					const transcript = await transcribeAudio(audioData, fileName);
+					const words = await transcribeAudio(audioData, fileName);
+					
+					// Format transcript for saving (with speaker labels)
+					let formattedTranscript = '';
+					let currentSpeaker = -1;
+					for (const wordInfo of words) {
+						if (currentSpeaker !== wordInfo.speakerTag) {
+							if (formattedTranscript) {
+								formattedTranscript += '\n\n';
+							}
+							formattedTranscript += `**Speaker ${wordInfo.speakerTag}:** `;
+							currentSpeaker = wordInfo.speakerTag;
+						}
+						formattedTranscript += wordInfo.word + ' ';
+					}
 					
 					// Save transcript as .txt file with same base name
 					const transcriptFileName = fileName.replace('.wav', '.txt');
 					const transcriptUri = vscode.Uri.joinPath(recordingsUri, transcriptFileName);
-					const transcriptBuffer = Buffer.from(transcript, 'utf8');
+					const transcriptBuffer = Buffer.from(formattedTranscript.trim(), 'utf8');
 					await vscode.workspace.fs.writeFile(transcriptUri, transcriptBuffer);
 					
 					vscode.window.showInformationMessage(`Transcript saved: ${transcriptFileName}`);
-					// TODO: Determine what line to put this on 
-					// Create comment on first line
-					createComment(transcript);
+					
+					// Group words by speaker segments
+					const segments = groupWordsBySpeaker(words);
+					
+					// Classify segments
+					let classifiedSegments: ClassifiedSegment[];
+					try {
+						classifiedSegments = await classifySegments(segments);
+					} catch (error) {
+						console.error('Classification failed:', error);
+						const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+						vscode.window.showErrorMessage(`Failed to classify speech segments: ${errorMessage}`);
+						return;
+					}
+					
+					// Split segments based on topic and context
+					let splitClassifiedSegments: ClassifiedSegment[];
+					try {
+						splitClassifiedSegments = await splitSegments(classifiedSegments);
+					} catch (error) {
+						console.error('Splitting failed:', error);
+						const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+						vscode.window.showErrorMessage(`Failed to split speech segments: ${errorMessage}`);
+						return;
+					}
+					
+					// Transform segments
+					let transformedSegments: TransformedSegment[];
+					try {
+						transformedSegments = await transformSegments(splitClassifiedSegments);
+					} catch (error) {
+						console.error('Transformation failed:', error);
+						const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+						vscode.window.showErrorMessage(`Failed to transform speech segments: ${errorMessage}`);
+						return;
+					}
+					
+					// Create comments aligned to code using context snapshots with transformed text
+					await createComments(transformedSegments, contextsToUse || []);
 				} catch (error) {
 					console.error('Transcription failed:', error);
 					const errorMessage = error instanceof Error ? error.message : 'Unknown error';
