@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  transcription-server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./server/.env
+    volumes:
+      - ./server/.env:/app/.env:ro
+    restart: unless-stopped

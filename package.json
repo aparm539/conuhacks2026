@@ -9,7 +9,7 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -26,6 +26,19 @@
         "command": "pr-notes.checkHealth",
         "title": "Check Diarization Service Health",
         "category": "PR Notes"
+      },
+      {
+        "command": "pr-notes.showMenu",
+        "title": "Show Recording Menu",
+        "icon": "$(mic)"
+      },
+      {
+        "command": "pr-notes.startRecording",
+        "title": "Start Recording"
+      },
+      {
+        "command": "pr-notes.stopRecording",
+        "title": "Stop Recording"
       }
     ],
     "configuration": {
@@ -40,6 +53,11 @@
           "type": "number",
           "default": 300000,
           "description": "Timeout for API requests in milliseconds (default: 5 minutes)"
+        },
+        "pr-notes.inputDevice": {
+          "type": "string",
+          "default": "default",
+          "description": "Selected audio input device ID for recording. Use 'default' for system default device."
         }
       }
     }
@@ -53,13 +71,16 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.108.1",
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
-    "typescript-eslint": "^8.52.0",
+    "@types/vscode": "^1.108.1",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.39.2",
     "typescript": "^5.9.3",
-    "@vscode/test-cli": "^0.0.12",
-    "@vscode/test-electron": "^2.5.2"
+    "typescript-eslint": "^8.52.0"
+  },
+  "dependencies": {
+    "node-audiorecorder": "^3.0.0"
   }
 }

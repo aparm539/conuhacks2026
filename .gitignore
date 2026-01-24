@@ -1,1 +1,5 @@
 node_modules
+/out
+.Ds_Store
+.env
+server/.env

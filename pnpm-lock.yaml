@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      node-audiorecorder:
+        specifier: ^3.0.0
+        version: 3.0.0
     devDependencies:
       '@types/mocha':
         specifier: ^10.0.10
@@ -669,6 +673,9 @@ packages:
 
   natural-compare@1.4.0:
     resolution: {integrity: sha512-OWND8ei3VtNC9h7V60qff3SVobHr996CTwgxubgyQYEpg290h9J0buyECNNJexkFm5sOajh5G116RYA1c8ZMSw==}
+
+  node-audiorecorder@3.0.0:
+    resolution: {integrity: sha512-nQepUJdQT4wD985zn7113tLZqVv0dh9ly9bsB6bE3GllPordEGUL7gFVnG2GCVArz/J/K+N50wo0574bwdpOeA==}
 
   normalize-path@3.0.0:
     resolution: {integrity: sha512-6eZs5Ls3WtCisHWp9S2GUy8dqkpGi4BVSz3GaqiE6ezub0512ESztXUwUB6C6IKbQkY2Pnb/mD4WYojCRwcwLA==}
@@ -1597,6 +1604,8 @@ snapshots:
   ms@2.1.3: {}
 
   natural-compare@1.4.0: {}
+
+  node-audiorecorder@3.0.0: {}
 
   normalize-path@3.0.0: {}
 
