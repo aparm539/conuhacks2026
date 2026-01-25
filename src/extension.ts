@@ -84,9 +84,14 @@ export function activate(context: vscode.ExtensionContext) {
 
 		// Filter out Ignore segments (safety check - server already filters them)
 		const segmentsToComment = transformedSegments.filter(seg => seg.classification !== 'Ignore');
+		
+		console.log(`[EXTENSION] Filtered ${transformedSegments.length} transformed segments, ${segmentsToComment.length} non-Ignore segments remain`);
 
 		if (segmentsToComment.length === 0) {
-			vscode.window.showWarningMessage('No speech segments found to create comments.');
+			const ignoreCount = transformedSegments.filter(seg => seg.classification === 'Ignore').length;
+			vscode.window.showWarningMessage(
+				`No speech segments found to create comments. ${transformedSegments.length} segments were processed, but ${ignoreCount} were classified as 'Ignore' and filtered out.`
+			);
 			return;
 		}
 
@@ -330,11 +335,18 @@ export function activate(context: vscode.ExtensionContext) {
 					
 					// Group words by speaker segments
 					const segments = groupWordsBySpeaker(words);
+					console.log(`[EXTENSION] Grouped ${words.length} words into ${segments.length} segments`);
+					
+					if (segments.length === 0) {
+						vscode.window.showWarningMessage('No speech segments found after grouping words. This might indicate an issue with the transcription.');
+						return;
+					}
 					
 					// Classify segments
 					let classifiedSegments: ClassifiedSegment[];
 					try {
 						classifiedSegments = await classifySegments(segments);
+						console.log(`[EXTENSION] Classified ${segments.length} segments into ${classifiedSegments.length} classified segments`);
 					} catch (error) {
 						console.error('Classification failed:', error);
 						const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -346,6 +358,7 @@ export function activate(context: vscode.ExtensionContext) {
 					let splitClassifiedSegments: ClassifiedSegment[];
 					try {
 						splitClassifiedSegments = await splitSegments(classifiedSegments);
+						console.log(`[EXTENSION] Split ${classifiedSegments.length} segments into ${splitClassifiedSegments.length} split segments`);
 					} catch (error) {
 						console.error('Splitting failed:', error);
 						const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -357,6 +370,14 @@ export function activate(context: vscode.ExtensionContext) {
 					let transformedSegments: TransformedSegment[];
 					try {
 						transformedSegments = await transformSegments(splitClassifiedSegments);
+						console.log(`[EXTENSION] Transformed ${splitClassifiedSegments.length} segments into ${transformedSegments.length} transformed segments`);
+						
+						// Log classification breakdown
+						const classificationCounts = transformedSegments.reduce((acc, seg) => {
+							acc[seg.classification] = (acc[seg.classification] || 0) + 1;
+							return acc;
+						}, {} as Record<string, number>);
+						console.log(`[EXTENSION] Classification breakdown:`, classificationCounts);
 					} catch (error) {
 						console.error('Transformation failed:', error);
 						const errorMessage = error instanceof Error ? error.message : 'Unknown error';
