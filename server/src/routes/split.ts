@@ -1,0 +1,53 @@
+import type { Request, Response } from 'express';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { splitSegmentsSequentially } from '../services/gemini';
+import { validateClassifiedSegments } from '../utils/validation';
+import type { SplitRequest, SplitResponse, SplitErrorResponse } from '../types/index';
+import { asyncHandler } from '../middleware/errorHandler';
+
+export function createSplitRoute(geminiClient: GoogleGenerativeAI | null) {
+  return asyncHandler(async (
+    req: Request<{}, SplitResponse, SplitRequest>,
+    res: Response<SplitResponse | SplitErrorResponse>
+  ) => {
+    if (!geminiClient) {
+      return res.status(500).json({ 
+        splitSegments: [],
+        error: 'Gemini client not initialized. Check server logs for API key errors.' 
+      } as SplitErrorResponse);
+    }
+
+    const { classifiedSegments } = req.body;
+
+    if (!classifiedSegments || !Array.isArray(classifiedSegments)) {
+      return res.status(400).json({ 
+        splitSegments: [],
+        error: 'Missing or invalid classifiedSegments data. Expected array of ClassifiedSegment.' 
+      } as SplitErrorResponse);
+    }
+
+    if (classifiedSegments.length === 0) {
+      return res.json({ splitSegments: [] });
+    }
+
+    // Validate segment structure
+    if (!validateClassifiedSegments(classifiedSegments)) {
+      return res.status(400).json({ 
+        splitSegments: [],
+        error: 'Invalid segment structure. Expected ClassifiedSegment with classification field.' 
+      } as SplitErrorResponse);
+    }
+
+    try {
+      const splitSegments = await splitSegmentsSequentially(classifiedSegments, geminiClient);
+      res.json({ splitSegments });
+    } catch (error) {
+      console.error('Splitting error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      res.status(500).json({ 
+        splitSegments: [],
+        error: `Splitting failed: ${errorMessage}` 
+      } as SplitErrorResponse);
+    }
+  });
+}
