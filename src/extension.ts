@@ -8,6 +8,8 @@ import { createStatusBarItem, updateStatusBar, showStatusBarMenu, StatusBarCallb
 import { ServerManager } from './services/serverManager';
 import { RecordingService } from './services/recordingService';
 import { handleAudioMessage } from './handlers/audioMessageHandler';
+import { getSession, getAuthState, onSessionChange, registerSessionChangeListener } from './githubAuth';
+import { getSelectedDevice, selectAudioDevice, listAudioDevices } from './audioDeviceManager';
 
 let audioService: AudioService;
 
@@ -27,12 +29,29 @@ export function activate(context: vscode.ExtensionContext) {
 	const statusBarItem = createStatusBarItem();
 	statusBarItem.command = "pr-notes.showMenu";
 
-	function refreshStatusBar() {
-		updateStatusBar(statusBarItem, recordingService.getIsRecording());
+	async function refreshStatusBar() {
+		const selectedDeviceId = getSelectedDevice();
+		let deviceDisplayName: string | undefined = undefined;
+
+		if (selectedDeviceId && selectedDeviceId !== 'default') {
+			// Look up device name from the device list
+			const devices = await listAudioDevices();
+			const device = devices.find(d => d.id === selectedDeviceId);
+			deviceDisplayName = device?.name;
+		}
+
+		const authState = await getAuthState();
+		updateStatusBar(statusBarItem, recordingService.getIsRecording(), deviceDisplayName, authState.accountLabel);
 	}
 
 	// Initial status bar update
 	refreshStatusBar();
+
+	// Auth: refresh status bar when GitHub sessions change (e.g. sign in/out from Accounts menu)
+	context.subscriptions.push(registerSessionChangeListener());
+	context.subscriptions.push(onSessionChange(() => {
+		refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+	}));
 
 	// Setup server manager callbacks
 	serverManager.start({
@@ -75,6 +94,24 @@ export function activate(context: vscode.ExtensionContext) {
 		recordingService.stopRecording();
 	}
 
+	async function handleSelectDevice(): Promise<void> {
+		await selectAudioDevice();
+		await refreshStatusBar();
+	}
+
+	async function handleLogin(): Promise<void> {
+		try {
+			const session = await getSession(true);
+			await refreshStatusBar();
+			if (session?.account.label) {
+				vscode.window.showInformationMessage(`Signed in as ${session.account.label}`);
+			}
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : 'Sign-in failed';
+			vscode.window.showErrorMessage(`GitHub sign-in failed: ${msg}`);
+		}
+	}
+
 	// Register command for processing audio file (diarisation)
 	const processAudioDisposable = vscode.commands.registerCommand('pr-notes.processAudio', async () => {
 		try {
@@ -102,17 +139,37 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Status bar menu command (recording)
 	const showMenuDisposable = vscode.commands.registerCommand('pr-notes.showMenu', async () => {
+		const selectedDeviceId = getSelectedDevice();
+		let deviceDisplayName: string | undefined = undefined;
+
+		if (selectedDeviceId && selectedDeviceId !== 'default') {
+			const devices = await listAudioDevices();
+			const device = devices.find(d => d.id === selectedDeviceId);
+			deviceDisplayName = device?.name;
+		}
+
+		const authState = await getAuthState();
 		const callbacks: StatusBarCallbacks = {
 			onStartRecording: handleStartRecording,
-			onStopRecording: handleStopRecording
+			onStopRecording: handleStopRecording,
+			onSelectDevice: handleSelectDevice,
+			onLogin: handleLogin
 		};
 
-		await showStatusBarMenu(recordingService.getIsRecording(), callbacks);
-		refreshStatusBar();
+		await showStatusBarMenu(recordingService.getIsRecording(), deviceDisplayName, callbacks, authState);
+		await refreshStatusBar();
 	});
+
+	const loginDisposable = vscode.commands.registerCommand('pr-notes.login', handleLogin);
 
 	context.subscriptions.push(statusBarItem);
 	context.subscriptions.push(commentController);
 	context.subscriptions.push(processAudioDisposable);
 	context.subscriptions.push(showMenuDisposable);
+	context.subscriptions.push(loginDisposable);
+}
+
+// This method is called when your extension is deactivated
+export function deactivate() {
+	// Cleanup if needed
 }

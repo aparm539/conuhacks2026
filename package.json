@@ -34,6 +34,11 @@
       {
         "command": "pr-notes.stopRecording",
         "title": "Stop Recording"
+      },
+      {
+        "command": "pr-notes.login",
+        "title": "Sign in with GitHub",
+        "category": "PR Notes"
       }
     ],
     "configuration": {
@@ -53,6 +58,26 @@
           "type": "string",
           "default": "default",
           "description": "Selected audio input device ID for recording. Use 'default' for system default device."
+        },
+        "pr-notes.postToGitHub": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, post PR review comments to GitHub (when signed in and on a PR branch). When false, only create local VS Code comments."
+        },
+        "pr-notes.owner": {
+          "type": "string",
+          "default": "",
+          "description": "Override GitHub repo owner (e.g. 'octocat'). When set with repo and pullNumber, used instead of git remote discovery."
+        },
+        "pr-notes.repo": {
+          "type": "string",
+          "default": "",
+          "description": "Override GitHub repo name (e.g. 'my-repo'). When set with owner and pullNumber, used instead of git remote discovery."
+        },
+        "pr-notes.pullNumber": {
+          "type": "number",
+          "default": 0,
+          "description": "Override PR number. When set with owner and repo, used instead of resolving PR from current branch."
         }
       }
     }

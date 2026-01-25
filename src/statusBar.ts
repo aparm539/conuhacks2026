@@ -1,8 +1,15 @@
 import * as vscode from 'vscode';
 
+export interface AuthState {
+	loggedIn: boolean;
+	accountLabel?: string;
+}
+
 export interface StatusBarCallbacks {
 	onStartRecording: () => void;
 	onStopRecording: () => void;
+	onSelectDevice: () => Promise<void>;
+	onLogin?: () => Promise<void>;
 }
 
 export function createStatusBarItem(): vscode.StatusBarItem {
@@ -18,20 +25,32 @@ export function createStatusBarItem(): vscode.StatusBarItem {
 
 export function updateStatusBar(
 	statusBarItem: vscode.StatusBarItem,
-	isRecording: boolean
+	isRecording: boolean,
+	currentDevice?: string,
+	accountLabel?: string
 ): void {
+	let tooltip = "Click to open recording menu";
+	if (accountLabel) {
+		tooltip = `Signed in as ${accountLabel} • ${tooltip}`;
+	}
 	if (isRecording) {
 		statusBarItem.text = "$(primitive-square) Recording";
-		statusBarItem.tooltip = "Click to open recording menu";
+		statusBarItem.tooltip = tooltip;
 	} else {
-		statusBarItem.text = "$(mic) Record";
-		statusBarItem.tooltip = "Click to open recording menu";
+		if (currentDevice) {
+			statusBarItem.text = `$(mic) Record (${currentDevice})`;
+		} else {
+			statusBarItem.text = "$(mic) Record";
+		}
+		statusBarItem.tooltip = tooltip;
 	}
 }
 
 export async function showStatusBarMenu(
 	isRecording: boolean,
-	callbacks: StatusBarCallbacks
+	currentDevice: string | undefined,
+	callbacks: StatusBarCallbacks,
+	authState?: AuthState
 ): Promise<void> {
 	const items: vscode.QuickPickItem[] = [];
 
@@ -50,6 +69,35 @@ export async function showStatusBarMenu(
 		});
 	}
 
+	items.push({
+		label: "",
+		kind: vscode.QuickPickItemKind.Separator
+	});
+
+	// Add device selection option
+	items.push({
+		label: "$(settings-gear) Select Input Device",
+		description: "Choose a different audio input device"
+	});
+
+	// Auth section
+	items.push({
+		label: "",
+		kind: vscode.QuickPickItemKind.Separator
+	});
+
+	if (authState?.loggedIn && authState.accountLabel) {
+		items.push({
+			label: "$(account) Signed in as " + authState.accountLabel,
+			description: "GitHub account"
+		});
+	} else {
+		items.push({
+			label: "$(github) Sign in with GitHub",
+			description: "Sign in to use GitHub features"
+		});
+	}
+
 	const selected = await vscode.window.showQuickPick(items, {
 		placeHolder: "Recording Options"
 	});
@@ -63,5 +111,9 @@ export async function showStatusBarMenu(
 		callbacks.onStartRecording();
 	} else if (selected.label.includes("Stop Recording")) {
 		callbacks.onStopRecording();
+	} else if (selected.label.includes("Current Device") || selected.label.includes("Select Input Device")) {
+		await callbacks.onSelectDevice();
+	} else if (selected.label.includes("Sign in with GitHub") && callbacks.onLogin) {
+		await callbacks.onLogin();
 	}
 }

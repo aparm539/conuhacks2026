@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { getFileRelativePath } from './utils/vscode';
+import { getRepositoryRelativePath } from './utils/filePath';
 
 export interface RecordingContext {
 	timestamp: number;
@@ -90,7 +90,9 @@ export class ContextCollector {
 		}
 
 		const document = editor.document;
-		const filePath = getFileRelativePath(document);
+
+		// Get file path (handles git: URIs from diff view)
+		const filePath = getRepositoryRelativePath(document.uri) ?? '';
 
 		const cursorLine = editor.selection.active.line;
 
