@@ -9,7 +9,9 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -43,6 +45,16 @@
       {
         "command": "pr-notes.login",
         "title": "Sign in with GitHub",
+        "category": "PR Notes"
+      },
+      {
+        "command": "pr-notes.downloadModels",
+        "title": "Download Speech Models",
+        "category": "PR Notes"
+      },
+      {
+        "command": "pr-notes.setGeminiApiKey",
+        "title": "Set Gemini API Key",
         "category": "PR Notes"
       }
     ],
@@ -83,12 +95,18 @@
           "type": "number",
           "default": 0,
           "description": "Override PR number. When set with owner and repo, used instead of resolving PR from current branch."
+        },
+        "pr-notes.geminiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Gemini API key for processing speech segments. Get one at https://aistudio.google.com/app/apikey"
         }
       }
     }
   },
   "scripts": {
-    "vscode:prepublish": "pnpm run compile",
+    "build:helper": "./scripts/build-helper.sh",
+    "vscode:prepublish": "pnpm run build:helper && pnpm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "pnpm run compile && pnpm run lint",
@@ -106,6 +124,7 @@
     "typescript-eslint": "^8.52.0"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.21.0",
     "node-audiorecorder": "^3.0.0"
   }
 }

@@ -2,5 +2,11 @@ node_modules
 /out
 .Ds_Store
 .env
+
+# Swift build artifacts
+src/fluid-helper/.build/
+bin/fluid-helper
+
+# Old server references (removed)
 server/.env
 server/dist

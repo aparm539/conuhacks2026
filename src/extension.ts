@@ -2,6 +2,7 @@
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as readline from 'readline';
 
 import {spawn, ChildProcess} from 'child_process';
 import { AudioService } from './audioService';
@@ -10,12 +11,12 @@ import { createStatusBarItem, updateStatusBar, showStatusBarMenu, StatusBarCallb
 import { getSession, getAuthState, onSessionChange, registerSessionChangeListener } from './githubAuth';
 import { getSelectedDevice, selectAudioDevice, listAudioDevices } from './audioDeviceManager';
 import { ContextCollector, RecordingContext } from './contextCollector';
-import { WordInfo, SpeakerSegment, ClassifiedSegment, TransformedSegment, groupWordsBySpeaker, findCommentLocation, findCommentLocationsBatch } from './speechAlignment';
+import { WordInfo, groupWordsBySpeaker, findCommentLocationsBatch } from './speechAlignment';
+import type { SpeakerSegment, TransformedSegment } from './types';
 import { getPrContext } from './gitHubPrContext';
 import { postReviewComments, type ReviewCommentInput } from './githubPrComments';
 import { getRepositoryRelativePath } from './utils/filePath';
-
-const TRANSCRIPTION_SERVER_URL = 'http://localhost:3000';
+import { processSegmentsCombined } from './services/gemini';
 
 let audioService: AudioService;
 
@@ -101,13 +102,12 @@ export function activate(context: vscode.ExtensionContext) {
 			return;
 		}
 
-		// Find all comment locations in parallel using batch API
+		// Find all comment locations in parallel using batch API (uses local Gemini)
 		const ranges = await findCommentLocationsBatch(
 			segmentsToComment,
 			contexts,
 			document,
-			currentFile || '',
-			TRANSCRIPTION_SERVER_URL
+			currentFile || ''
 		);
 
 		// Build GitHub review comment payload (path, 1-based line, body) and create VS Code threads
@@ -176,170 +176,238 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	}
 
-	async function transcribeAudio(audioData: Buffer, audioFilePath: string): Promise<WordInfo[]> {
-		const audioBase64 = audioData.toString('base64');
-		
-		try {
-			const response = await fetch(`${TRANSCRIPTION_SERVER_URL}/transcribe`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					audio: audioBase64,
-				}),
-			});
+	// Fluid helper process for transcription/diarization
+	let fluidHelper: ChildProcess | null = null;
+	let pendingSegments: SpeakerSegment[] = [];
+	let fluidHelperReady = false;
 
-			if (!response.ok) {
-				const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
-				throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
-			}
+	// Model download timeout: 15 minutes for first-run downloads (~650MB)
+	const MODEL_DOWNLOAD_TIMEOUT_MS = 900000;
 
-			const data = await response.json() as { words?: WordInfo[] };
-			
-			if (!data.words || !Array.isArray(data.words)) {
-				throw new Error('No words array in response');
+	/**
+	 * Start the fluid-helper process for transcription and diarization
+	 * @param showSuccessMessage - Whether to show a success message when models are ready
+	 */
+	async function startFluidHelper(showSuccessMessage: boolean = false): Promise<void> {
+		if (fluidHelper && fluidHelperReady) {
+			if (showSuccessMessage) {
+				vscode.window.showInformationMessage('Speech models are already downloaded and ready!');
 			}
-
-			return data.words;
-		} catch (error) {
-			if (error instanceof TypeError && error.message.includes('fetch')) {
-				throw new Error('Failed to connect to transcription server. Make sure the Docker container is running on port 3000.');
-			}
-			throw error;
+			return;
 		}
+
+		// Show progress while loading models (can take a while on first run)
+		await vscode.window.withProgress({
+			location: vscode.ProgressLocation.Notification,
+			title: "Loading Speech Models",
+			cancellable: false
+		}, async (progress) => {
+			modelDownloadProgress = progress;
+			
+			return new Promise<void>((resolve, reject) => {
+				const helperPath = path.join(context.extensionPath, 'bin', 'fluid-helper');
+				console.log(`[FluidHelper] Starting helper at: ${helperPath}`);
+
+				progress.report({ message: 'Starting speech recognition engine...' });
+
+				fluidHelper = spawn(helperPath, [], {
+					stdio: ['pipe', 'pipe', 'pipe']
+				});
+
+				// Parse JSON lines from stdout
+				const rl = readline.createInterface({ input: fluidHelper.stdout! });
+				rl.on('line', (line) => {
+					try {
+						const msg = JSON.parse(line);
+						handleFluidHelperMessage(msg, showSuccessMessage);
+						if (msg.type === 'ready') {
+							fluidHelperReady = true;
+							modelDownloadProgress = null;
+							resolve();
+						}
+					} catch (e) {
+						console.error('[FluidHelper] Invalid JSON:', line);
+					}
+				});
+
+				fluidHelper.stderr?.on('data', (data) => {
+					console.error(`[FluidHelper] stderr: ${data.toString().trim()}`);
+				});
+
+				fluidHelper.on('close', (code) => {
+					console.log(`[FluidHelper] Process exited with code ${code}`);
+					fluidHelper = null;
+					fluidHelperReady = false;
+					modelDownloadProgress = null;
+				});
+
+				fluidHelper.on('error', (err) => {
+					console.error('[FluidHelper] Process error:', err);
+					fluidHelper = null;
+					fluidHelperReady = false;
+					modelDownloadProgress = null;
+					reject(err);
+				});
+
+				// Send init command
+				fluidHelper.stdin!.write(JSON.stringify({ type: 'init' }) + '\n');
+
+				// Set timeout for initialization (model download can take a while)
+				setTimeout(() => {
+					if (!fluidHelperReady) {
+						modelDownloadProgress = null;
+						reject(new Error('Speech model initialization timed out. First run downloads ~650MB of models - please try again with a stable internet connection.'));
+					}
+				}, MODEL_DOWNLOAD_TIMEOUT_MS);
+			});
+		});
 	}
 
-	async function classifySegments(segments: SpeakerSegment[]): Promise<ClassifiedSegment[]> {
-		try {
-			const response = await fetch(`${TRANSCRIPTION_SERVER_URL}/classify`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					segments: segments,
-				}),
-			});
+	// Track model download progress notification
+	let modelDownloadProgress: vscode.Progress<{ message?: string; increment?: number }> | null = null;
 
-			if (!response.ok) {
-				const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
-				throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
-			}
-
-			const data = await response.json() as { classifiedSegments?: ClassifiedSegment[] };
-			
-			if (!data.classifiedSegments || !Array.isArray(data.classifiedSegments)) {
-				throw new Error('No classifiedSegments array in response');
-			}
-
-			return data.classifiedSegments;
-		} catch (error) {
-			if (error instanceof TypeError && error.message.includes('fetch')) {
-				throw new Error('Failed to connect to transcription server. Make sure the Docker container is running on port 3000.');
-			}
-			throw error;
-		}
-	}
-
-	async function transformSegments(classifiedSegments: ClassifiedSegment[]): Promise<TransformedSegment[]> {
-		try {
-			const response = await fetch(`${TRANSCRIPTION_SERVER_URL}/transform`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					classifiedSegments: classifiedSegments,
-				}),
-			});
-
-			if (!response.ok) {
-				const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
-				throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
-			}
-
-			const data = await response.json() as { transformedSegments?: TransformedSegment[] };
-			
-			if (!data.transformedSegments || !Array.isArray(data.transformedSegments)) {
-				throw new Error('No transformedSegments array in response');
-			}
-
-			return data.transformedSegments;
-		} catch (error) {
-			if (error instanceof TypeError && error.message.includes('fetch')) {
-				throw new Error('Failed to connect to transcription server. Make sure the Docker container is running on port 3000.');
-			}
-			throw error;
-		}
-	}
-
-	async function splitSegments(classifiedSegments: ClassifiedSegment[]): Promise<ClassifiedSegment[]> {
-		try {
-			const response = await fetch(`${TRANSCRIPTION_SERVER_URL}/split`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					classifiedSegments: classifiedSegments,
-				}),
-			});
-
-			if (!response.ok) {
-				const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
-				throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
-			}
-
-			const data = await response.json() as { splitSegments?: ClassifiedSegment[] };
-			
-			if (!data.splitSegments || !Array.isArray(data.splitSegments)) {
-				throw new Error('No splitSegments array in response');
-			}
-
-			return data.splitSegments;
-		} catch (error) {
-			if (error instanceof TypeError && error.message.includes('fetch')) {
-				throw new Error('Failed to connect to transcription server. Make sure the Docker container is running on port 3000.');
-			}
-			throw error;
+	/**
+	 * Handle messages from fluid-helper
+	 * @param showSuccessMessage - Whether to show a success message when models are ready
+	 */
+	async function handleFluidHelperMessage(msg: { type: string; [key: string]: unknown }, showSuccessMessage: boolean = false) {
+		switch (msg.type) {
+			case 'ready':
+				console.log('[FluidHelper] Models loaded and ready');
+				if (showSuccessMessage) {
+					vscode.window.showInformationMessage('Speech models downloaded and ready! You can now start recording.');
+				}
+				break;
+			case 'progress':
+				// Model download progress
+				console.log(`[FluidHelper] Progress: ${msg.stage} - ${msg.message} (${msg.percent ?? '...'}%)`);
+				if (modelDownloadProgress) {
+					// Format stage name for display
+					const stageName = msg.stage === 'asr' ? 'Speech Recognition' : 
+									  msg.stage === 'diarization' ? 'Speaker Detection' : 
+									  String(msg.stage);
+					const percent = msg.percent ? ` (${msg.percent}%)` : '';
+					modelDownloadProgress.report({ 
+						message: `${stageName}: ${msg.message}${percent}`,
+						increment: msg.percent ? 5 : 0
+					});
+				}
+				break;
+			case 'volatile':
+				// Interim transcription results - update status bar
+				console.log(`[FluidHelper] Volatile: ${msg.text}`);
+				break;
+			case 'confirmed':
+				console.log(`[FluidHelper] Confirmed: ${msg.text} (confidence: ${msg.confidence})`);
+				break;
+			case 'segment':
+				// Collect segments for Gemini processing
+				pendingSegments.push({
+					speakerTag: msg.speakerId as number,
+					text: msg.text as string,
+					startTime: msg.start as number,
+					endTime: msg.end as number
+				});
+				break;
+			case 'done':
+				// All segments received, process with Gemini
+				await processRecordedSegments(pendingSegments, pendingContext || []);
+				pendingSegments = [];
+				break;
+			case 'error':
+				console.error(`[FluidHelper] Error: ${msg.message}`);
+				vscode.window.showErrorMessage(`Transcription error: ${msg.message}`);
+				break;
 		}
 	}
 
 	/**
-	 * Combined endpoint: classify, split, and transform segments in a single request
-	 * Reduces HTTP round-trips from 3 to 1 for faster processing
+	 * Process recorded segments with Gemini and create comments
 	 */
-	async function processSegments(segments: SpeakerSegment[]): Promise<TransformedSegment[]> {
-		try {
-			const response = await fetch(`${TRANSCRIPTION_SERVER_URL}/process-segments`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					segments: segments,
-				}),
-			});
-
-			if (!response.ok) {
-				const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
-				throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
-			}
-
-			const data = await response.json() as { transformedSegments?: TransformedSegment[] };
-			
-			if (!data.transformedSegments || !Array.isArray(data.transformedSegments)) {
-				throw new Error('No transformedSegments array in response');
-			}
-
-			return data.transformedSegments;
-		} catch (error) {
-			if (error instanceof TypeError && error.message.includes('fetch')) {
-				throw new Error('Failed to connect to transcription server. Make sure the Docker container is running on port 3000.');
-			}
-			throw error;
+	async function processRecordedSegments(segments: SpeakerSegment[], contexts: RecordingContext[]) {
+		if (segments.length === 0) {
+			vscode.window.showWarningMessage('No speech segments found in recording.');
+			return;
 		}
+
+		await vscode.window.withProgress({
+			location: vscode.ProgressLocation.Notification,
+			title: "Processing Speech",
+			cancellable: false
+		}, async (progress) => {
+			progress.report({ increment: 0, message: `Processing ${segments.length} segments...` });
+
+			try {
+				// Process segments with Gemini (classify, split, transform)
+				const transformedSegments = await processSegmentsCombined(segments);
+				console.log(`[EXTENSION] Processed ${segments.length} segments into ${transformedSegments.length} transformed segments`);
+
+				// Log classification breakdown
+				const classificationCounts = transformedSegments.reduce((acc, seg) => {
+					acc[seg.classification] = (acc[seg.classification] || 0) + 1;
+					return acc;
+				}, {} as Record<string, number>);
+				console.log(`[EXTENSION] Classification breakdown:`, classificationCounts);
+
+				progress.report({ increment: 60, message: `Creating ${transformedSegments.length} comments...` });
+
+				// Create comments
+				await createComments(transformedSegments, contexts);
+
+				progress.report({ increment: 40, message: "Complete!" });
+			} catch (error) {
+				console.error('Processing failed:', error);
+				const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+				vscode.window.showErrorMessage(`Failed to process speech: ${errorMessage}`);
+			}
+		});
+
+		isRecording = false;
+		refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+	}
+
+	/**
+	 * Send audio data to fluid-helper for processing
+	 */
+	function sendAudioToFluidHelper(audioData: Buffer) {
+		if (!fluidHelper?.stdin) {
+			console.error('[FluidHelper] Not ready to receive audio');
+			return;
+		}
+
+		// Convert WAV to PCM and send to helper
+		// The fluid-helper expects 16kHz mono PCM data
+		const pcmData = extractPCMFromWAV(audioData);
+		const msg = { type: 'audio', data: pcmData.toString('base64'), sampleRate: 16000 };
+		fluidHelper.stdin.write(JSON.stringify(msg) + '\n');
+	}
+
+	/**
+	 * Extract PCM data from WAV buffer
+	 * Assumes WAV is 16-bit PCM (most common format from sox)
+	 */
+	function extractPCMFromWAV(wavBuffer: Buffer): Buffer {
+		// WAV header is typically 44 bytes
+		// Find "data" chunk
+		let dataOffset = 44;
+		for (let i = 0; i < wavBuffer.length - 4; i++) {
+			if (wavBuffer.toString('ascii', i, i + 4) === 'data') {
+				// Skip "data" + 4 bytes for chunk size
+				dataOffset = i + 8;
+				break;
+			}
+		}
+		return wavBuffer.subarray(dataOffset);
+	}
+
+	/**
+	 * Signal end of audio to fluid-helper
+	 */
+	function endFluidHelperAudio() {
+		if (!fluidHelper?.stdin) {
+			return;
+		}
+		fluidHelper.stdin.write(JSON.stringify({ type: 'end' }) + '\n');
 	}
 
 	function startServer() {
@@ -357,7 +425,6 @@ export function activate(context: vscode.ExtensionContext) {
 			console.log(`Server process exited with code ${code}, Signal: ${signal}`);
 			serverProcess = null;
 			isRecording = false;
-			// Clean up context collector if recording was interrupted
 			if (pendingContext === null) {
 				contextCollector.clear();
 			}
@@ -366,141 +433,49 @@ export function activate(context: vscode.ExtensionContext) {
 		});
 
 		serverProcess.on('message', async (message: { type: string; data: string }) => {
-			console.log("We have a message");
+			console.log("[EXTENSION] Received audio from recorder");
 			if (message.type === 'audio') {
 				const audioData = Buffer.from(message.data, 'base64');
-				
-				
-				const storageUri = context.globalStorageUri;
-				const recordingsUri = vscode.Uri.joinPath(storageUri, 'recordings');
-				
-				// Create directory 
-				await vscode.workspace.fs.createDirectory(recordingsUri);
-
-				console.log(recordingsUri); 
-				
-				// Prepare file names and data
-				const fileName = `${Date.now()}.wav`;
-				const fileUri = vscode.Uri.joinPath(recordingsUri, fileName);
-				const contextsToUse = pendingContext; // Store before clearing
+				const contextsToUse = pendingContext;
 				pendingContext = null;
 
-				// Prepare context file data if available
-				const fileWritePromises: Promise<void>[] = [
-					new Promise<void>((resolve, reject) => {
-						vscode.workspace.fs.writeFile(fileUri, audioData).then(() => {
-							vscode.window.showInformationMessage(`Recording saved: ${fileName}`);
-							resolve();
-						}, reject);
-					})
-				];
+				// Save audio file
+				const storageUri = context.globalStorageUri;
+				const recordingsUri = vscode.Uri.joinPath(storageUri, 'recordings');
+				await vscode.workspace.fs.createDirectory(recordingsUri);
 
+				const fileName = `${Date.now()}.wav`;
+				const fileUri = vscode.Uri.joinPath(recordingsUri, fileName);
+				await vscode.workspace.fs.writeFile(fileUri, audioData);
+				console.log(`[EXTENSION] Recording saved: ${fileName}`);
+
+				// Save context if available
 				if (contextsToUse && contextsToUse.length > 0) {
 					const contextFileName = fileName.replace('.wav', '.context.json');
 					const contextUri = vscode.Uri.joinPath(recordingsUri, contextFileName);
-					const contextJson = JSON.stringify(contextsToUse, null, 2);
-					const contextBuffer = Buffer.from(contextJson, 'utf8');
-					fileWritePromises.push(
-						new Promise<void>((resolve, reject) => {
-							vscode.workspace.fs.writeFile(contextUri, contextBuffer).then(() => {
-								console.log(`Context saved: ${contextFileName}`);
-								resolve();
-							}, reject);
-						})
-					);
+					const contextBuffer = Buffer.from(JSON.stringify(contextsToUse, null, 2), 'utf8');
+					await vscode.workspace.fs.writeFile(contextUri, contextBuffer);
 				}
 
-				// Start file writes in parallel (don't await yet - start transcription immediately)
-				// File writes will complete in background
-				Promise.all(fileWritePromises).catch(err => {
-					console.error('Error saving files:', err);
-				});
-				
-				// Transcribe the audio (start immediately, don't wait for file writes)
+				// Process with fluid-helper
 				try {
-					const words = await transcribeAudio(audioData, fileName);
-					
-					// Format transcript for saving (with speaker labels)
-					let formattedTranscript = '';
-					let currentSpeaker = -1;
-					for (const wordInfo of words) {
-						if (currentSpeaker !== wordInfo.speakerTag) {
-							if (formattedTranscript) {
-								formattedTranscript += '\n\n';
-							}
-							formattedTranscript += `**Speaker ${wordInfo.speakerTag}:** `;
-							currentSpeaker = wordInfo.speakerTag;
-						}
-						formattedTranscript += wordInfo.word + ' ';
-					}
-					
-					// Save transcript as .txt file (add to parallel file writes)
-					const transcriptFileName = fileName.replace('.wav', '.txt');
-					const transcriptUri = vscode.Uri.joinPath(recordingsUri, transcriptFileName);
-					const transcriptBuffer = Buffer.from(formattedTranscript.trim(), 'utf8');
-					fileWritePromises.push(
-						new Promise<void>((resolve, reject) => {
-							vscode.workspace.fs.writeFile(transcriptUri, transcriptBuffer).then(() => {
-								vscode.window.showInformationMessage(`Transcript saved: ${transcriptFileName}`);
-								resolve();
-							}, reject);
-						})
-					);
+					// Start helper if not running
+					await startFluidHelper();
 
-					// Wait for all file writes to complete (including transcript)
-					await Promise.all(fileWritePromises);
-					
-					// Process audio with progress notifications
-					await vscode.window.withProgress({
-						location: vscode.ProgressLocation.Notification,
-						title: "Processing Audio",
-						cancellable: false
-					}, async (progress) => {
-						// Group words by speaker segments
-						progress.report({ increment: 0, message: "Grouping words into segments..." });
-						const segments = groupWordsBySpeaker(words);
-						console.log(`[EXTENSION] Grouped ${words.length} words into ${segments.length} segments`);
-						
-						if (segments.length === 0) {
-							vscode.window.showWarningMessage('No speech segments found after grouping words. This might indicate an issue with the transcription.');
-							return;
-						}
-						
-						// Process segments (classify, split, transform) in a single request
-						progress.report({ increment: 60, message: `Processing ${segments.length} segments...` });
-						let transformedSegments: TransformedSegment[];
-						try {
-							transformedSegments = await processSegments(segments);
-							console.log(`[EXTENSION] Processed ${segments.length} segments into ${transformedSegments.length} transformed segments`);
-							
-							// Log classification breakdown
-							const classificationCounts = transformedSegments.reduce((acc, seg) => {
-								acc[seg.classification] = (acc[seg.classification] || 0) + 1;
-								return acc;
-							}, {} as Record<string, number>);
-							console.log(`[EXTENSION] Classification breakdown:`, classificationCounts);
-						} catch (error) {
-							console.error('Processing failed:', error);
-							const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-							vscode.window.showErrorMessage(`Failed to process speech segments: ${errorMessage}`);
-							return;
-						}
-						
-						// Create comments aligned to code using context snapshots with transformed text
-						const segmentsToComment = transformedSegments.filter(seg => seg.classification !== 'Ignore');
-						progress.report({ increment: 20, message: `Finding locations for ${segmentsToComment.length} comments...` });
-						await createComments(transformedSegments, contextsToUse || []);
-						
-						progress.report({ increment: 20, message: "Complete!" });
-					});
+					// Store context for when segments arrive
+					pendingContext = contextsToUse;
+
+					// Send audio to helper
+					sendAudioToFluidHelper(audioData);
+					endFluidHelperAudio();
+
 				} catch (error) {
-					console.error('Transcription failed:', error);
+					console.error('Failed to process with fluid-helper:', error);
 					const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-					vscode.window.showErrorMessage(`Failed to transcribe audio: ${errorMessage}`);
+					vscode.window.showErrorMessage(`Failed to start transcription: ${errorMessage}. Make sure fluid-helper is built.`);
+					isRecording = false;
+					refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 				}
-				
-				isRecording = false;
-				refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 			}
 		});
 
@@ -515,9 +490,8 @@ export function activate(context: vscode.ExtensionContext) {
 			refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 		});
 
-		// Capture stdout, shown in debug console
 		serverProcess.stdout?.on('data', (data) => {
-			console.log(`[Server]: ${data.toString().trim()}`);
+			console.log(`[Recorder]: ${data.toString().trim()}`);
 		});
 	}
 
@@ -646,6 +620,49 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const loginDisposable = vscode.commands.registerCommand('pr-notes.login', handleLogin);
 
+	// Download speech models command - allows users to pre-download models before first recording
+	const downloadModelsDisposable = vscode.commands.registerCommand('pr-notes.downloadModels', async () => {
+		try {
+			await startFluidHelper(true); // Show success message when complete
+		} catch (error) {
+			const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+			vscode.window.showErrorMessage(`Failed to download speech models: ${errorMessage}`);
+		}
+	});
+
+	// Set Gemini API key command - prompts user to enter their API key
+	const setGeminiApiKeyDisposable = vscode.commands.registerCommand('pr-notes.setGeminiApiKey', async () => {
+		const config = vscode.workspace.getConfiguration('pr-notes');
+		const currentKey = config.get<string>('geminiApiKey') || '';
+		
+		const apiKey = await vscode.window.showInputBox({
+			prompt: 'Enter your Gemini API key',
+			placeHolder: 'AIza...',
+			value: currentKey ? '••••••••' + currentKey.slice(-4) : '',
+			password: true,
+			ignoreFocusOut: true,
+			validateInput: (value) => {
+				if (!value || value.trim().length === 0) {
+					return 'API key cannot be empty';
+				}
+				if (value.startsWith('••••')) {
+					return 'Please enter a new API key or press Escape to cancel';
+				}
+				return null;
+			}
+		});
+
+		if (apiKey && !apiKey.startsWith('••••')) {
+			try {
+				await config.update('geminiApiKey', apiKey.trim(), vscode.ConfigurationTarget.Global);
+				vscode.window.showInformationMessage('Gemini API key saved successfully!');
+			} catch (error) {
+				const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+				vscode.window.showErrorMessage(`Failed to save API key: ${errorMessage}`);
+			}
+		}
+	});
+
 	context.subscriptions.push(statusBarItem);
 	context.subscriptions.push(commentController);
 	context.subscriptions.push(processAudioDisposable);
@@ -653,6 +670,8 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(showMenuDisposable);
 	context.subscriptions.push(helloWorldDisposable);
 	context.subscriptions.push(loginDisposable);
+	context.subscriptions.push(downloadModelsDisposable);
+	context.subscriptions.push(setGeminiApiKeyDisposable);
 }
 
 // This method is called when your extension is deactivated

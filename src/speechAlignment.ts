@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { RecordingContext } from './contextCollector';
+import { selectCommentLocationsBatch } from './services/gemini';
+import type { CandidateLocation } from './types';
 
 export interface WordInfo {
 	word: string;
@@ -257,20 +259,19 @@ export async function extractCodeContext(
 }
 
 /**
- * Find the best location for a comment using Gemini API
- * Falls back to heuristic if Gemini fails
+ * Find the best location for a comment using heuristics
+ * Uses nearest context's cursor line or falls back to file-level
  */
 export async function findCommentLocation(
 	segment: TransformedSegment,
 	contexts: RecordingContext[],
 	document: vscode.TextDocument,
-	currentFile: string,
-	serverUrl: string = 'http://localhost:3000'
+	currentFile: string
 ): Promise<vscode.Range> {
 	const lineCount = document.lineCount;
 
-	// Get top 5 candidate contexts
-	const candidateContexts = findNearestContexts(segment.startTime, contexts, 5, currentFile);
+	// Get nearest context
+	const candidateContexts = findNearestContexts(segment.startTime, contexts, 1, currentFile);
 
 	if (candidateContexts.length === 0) {
 		// Fallback: use file-level
@@ -278,117 +279,6 @@ export async function findCommentLocation(
 		return new vscode.Range(0, 0, 0, firstLine.text.length);
 	}
 
-	// Extract code context for each candidate
-	const candidates = await Promise.all(
-		candidateContexts.map(async (context) => {
-			const codeContext = await extractCodeContext(context, document);
-			return {
-				timestamp: context.timestamp,
-				file: context.file,
-				cursorLine: context.cursorLine,
-				visibleRange: context.visibleRange,
-				symbolsInView: context.symbolsInView,
-				codeContext: codeContext
-			};
-		})
-	);
-
-	// Try to use Gemini API for location selection
-	try {
-		const response = await fetch(`${serverUrl}/select-comment-location`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				commentText: segment.transformedText,
-				classification: segment.classification,
-				candidates: candidates,
-				fileName: currentFile,
-			}),
-		});
-
-		if (response.ok) {
-			const data = await response.json() as { selectedIndex: number; rationale?: string };
-			
-			if (typeof data.selectedIndex === 'number' && 
-			    data.selectedIndex >= 0 && 
-			    data.selectedIndex < candidates.length) {
-				const selectedCandidate = candidateContexts[data.selectedIndex];
-				
-				// Convert to range - prefer cursor line, then first visible symbol
-				if (selectedCandidate.cursorLine >= 0 && selectedCandidate.cursorLine < lineCount) {
-					const line = document.lineAt(selectedCandidate.cursorLine);
-					return new vscode.Range(
-						selectedCandidate.cursorLine,
-						0,
-						selectedCandidate.cursorLine,
-						line.text.length
-					);
-				}
-
-				// Try visible symbols
-				if (selectedCandidate.symbolsInView && selectedCandidate.symbolsInView.length > 0) {
-					try {
-						const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-							'vscode.executeDocumentSymbolProvider',
-							document.uri
-						);
-
-						if (symbols && Array.isArray(symbols)) {
-							const findSymbolByName = (
-								symbols: vscode.DocumentSymbol[],
-								name: string
-							): vscode.DocumentSymbol | null => {
-								for (const symbol of symbols) {
-									if (symbol.name === name) {
-										return symbol;
-									}
-									if (symbol.children && symbol.children.length > 0) {
-										const found = findSymbolByName(symbol.children, name);
-										if (found) {
-											return found;
-										}
-									}
-								}
-								return null;
-							};
-
-							for (const symbolName of selectedCandidate.symbolsInView) {
-								const symbol = findSymbolByName(symbols, symbolName);
-								if (symbol) {
-									const line = document.lineAt(symbol.range.start.line);
-									return new vscode.Range(
-										symbol.range.start.line,
-										0,
-										symbol.range.start.line,
-										line.text.length
-									);
-								}
-							}
-						}
-					} catch (error) {
-						console.warn('Failed to query document symbols for comment placement:', error);
-					}
-				}
-
-				// Fallback to visible range start
-				if (selectedCandidate.visibleRange[0] >= 0 && selectedCandidate.visibleRange[0] < lineCount) {
-					const line = document.lineAt(selectedCandidate.visibleRange[0]);
-					return new vscode.Range(
-						selectedCandidate.visibleRange[0],
-						0,
-						selectedCandidate.visibleRange[0],
-						line.text.length
-					);
-				}
-			}
-		}
-	} catch (error) {
-		console.warn('Failed to use Gemini for location selection, falling back to heuristic:', error);
-	}
-
-	// Fallback to heuristic: use first candidate (nearest context)
 	const fallbackContext = candidateContexts[0];
 	
 	// 1. Try cursor line
@@ -453,15 +343,14 @@ export async function findCommentLocation(
 }
 
 /**
- * Find the best locations for multiple comments using batch API
+ * Find the best locations for multiple comments using Gemini API
  * Returns an array of ranges corresponding to each segment
  */
 export async function findCommentLocationsBatch(
 	segments: TransformedSegment[],
 	contexts: RecordingContext[],
 	document: vscode.TextDocument,
-	currentFile: string,
-	serverUrl: string = 'http://localhost:3000'
+	currentFile: string
 ): Promise<vscode.Range[]> {
 	const lineCount = document.lineCount;
 
@@ -471,7 +360,7 @@ export async function findCommentLocationsBatch(
 	);
 
 	// Extract code context for all candidates in parallel
-	const allCandidates = await Promise.all(
+	const allCandidates: CandidateLocation[][] = await Promise.all(
 		allCandidateContexts.map(async (candidateContexts) => {
 			if (candidateContexts.length === 0) {
 				return [];
@@ -483,7 +372,7 @@ export async function findCommentLocationsBatch(
 						timestamp: context.timestamp,
 						file: context.file,
 						cursorLine: context.cursorLine,
-						visibleRange: context.visibleRange,
+						visibleRange: context.visibleRange as [number, number],
 						symbolsInView: context.symbolsInView,
 						codeContext: codeContext
 					};
@@ -500,33 +389,18 @@ export async function findCommentLocationsBatch(
 		fileName: currentFile
 	}));
 
-	// Call batch API
+	// Call local Gemini service directly
 	try {
-		const response = await fetch(`${serverUrl}/select-comment-locations`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				segments: batchSegments,
-				candidates: allCandidates,
-			}),
-		});
-
-		if (!response.ok) {
-			throw new Error(`HTTP error! status: ${response.status}`);
-		}
-
-		const data = await response.json() as { locations: Array<{ selectedIndex: number; rationale?: string }> };
+		const locations = await selectCommentLocationsBatch(batchSegments, allCandidates);
 		
-		if (!data.locations || !Array.isArray(data.locations) || data.locations.length !== segments.length) {
-			throw new Error(`Invalid response: expected ${segments.length} locations, got ${data.locations?.length || 0}`);
+		if (locations.length !== segments.length) {
+			throw new Error(`Invalid response: expected ${segments.length} locations, got ${locations.length}`);
 		}
 
 		// Convert selected indices to ranges
 		const ranges: vscode.Range[] = [];
 		for (let i = 0; i < segments.length; i++) {
-			const location = data.locations[i];
+			const location = locations[i];
 			const candidateContexts = allCandidateContexts[i];
 			const selectedCandidate = candidateContexts[location.selectedIndex];
 
@@ -617,12 +491,18 @@ export async function findCommentLocationsBatch(
 
 		return ranges;
 	} catch (error) {
-		console.warn('Failed to use batch API for location selection, falling back to individual calls:', error);
-		// Fallback to individual calls
+		console.warn('Failed to use Gemini for location selection, falling back to simple location:', error);
+		// Fallback: use cursor line from nearest context
 		const ranges: vscode.Range[] = [];
 		for (const segment of segments) {
-			const range = await findCommentLocation(segment, contexts, document, currentFile, serverUrl);
-			ranges.push(range);
+			const nearestContexts = findNearestContexts(segment.startTime, contexts, 1, currentFile);
+			if (nearestContexts.length > 0 && nearestContexts[0].cursorLine >= 0 && nearestContexts[0].cursorLine < lineCount) {
+				const line = document.lineAt(nearestContexts[0].cursorLine);
+				ranges.push(new vscode.Range(nearestContexts[0].cursorLine, 0, nearestContexts[0].cursorLine, line.text.length));
+			} else {
+				const firstLine = document.lineAt(0);
+				ranges.push(new vscode.Range(0, 0, 0, firstLine.text.length));
+			}
 		}
 		return ranges;
 	}
