@@ -298,7 +298,7 @@ export async function splitSegmentsBatch(
         .join('\n')}`
     : '';
 
-  const prompt = `You are analyzing code review speech segments to determine if they should be split into multiple comments.
+  const prompt = `You are analyzing code review speech segments to determine if they should be split into multiple comments and to identify duplicate segments.
 
 A segment should be split if:
 - It discusses multiple distinct topics (e.g., different functions, different concerns, different code areas)
@@ -312,23 +312,34 @@ A segment should NOT be split if:
 - Splitting would fragment a cohesive comment
 - The segment is already appropriately sized
 
-For each segment below (indices ${segmentStartIndex} to ${segmentEndIndex - 1}), analyze whether it should be split. If it should be split, identify natural break points in the text and return an array of the split text parts. If it should not be split, return "keep".
+IMPORTANT: Duplicate Detection
+- Compare each segment (indices ${segmentStartIndex} to ${segmentEndIndex - 1}) against ALL other segments (including context segments)
+- If a segment expresses the same or very similar meaning as another segment, mark it as "duplicate"
+- Mark duplicates even if the wording is slightly different but the meaning is the same
+- Keep the FIRST occurrence and mark subsequent duplicates
+- Only mark as "duplicate" if the segments are truly redundant, not just related
+
+For each segment below (indices ${segmentStartIndex} to ${segmentEndIndex - 1}), analyze:
+1. Whether it should be split (return array of parts) or kept as-is (return "keep")
+2. Whether it is a duplicate of another segment (return "duplicate")
 
 Segments to analyze:${segmentsText}${contextText}
 
-Return ONLY a valid JSON array with exactly ${segments.length} element(s), one for each segment in order. Each element must be either:
-- The string "keep" (if the segment should remain as one comment)
-- An array of strings (if the segment should be split, each string is a part of the original text)
+Return ONLY a valid JSON array with exactly ${segments.length} element(s), one for each segment in order. Each element must be one of:
+- The string "keep" (if the segment should remain as one comment and is not a duplicate)
+- An array of strings (if the segment should be split into multiple parts and is not a duplicate)
+- The string "duplicate" (if the segment is a duplicate of another segment and should be removed)
 
 IMPORTANT: Return ONLY the JSON array, no other text, no markdown, no explanations.
 
-Example for 2 segments:
+Example for 3 segments:
 Input:
 [0] [Suggestion] Speaker 1: "This function could be improved and also we should add error handling here"
 [1] [Question] Speaker 1: "How does this work?"
+[2] [Suggestion] Speaker 1: "This function could be improved"
 
 Output (JSON only):
-[["This function could be improved", "Also we should add error handling here"], "keep"]
+[["This function could be improved", "Also we should add error handling here"], "keep", "duplicate"]
 
 Now return the JSON array for the segments above:`;
 
@@ -364,11 +375,11 @@ Now return the JSON array for the segments above:`;
   // Validate each decision
   for (let i = 0; i < splitDecisions.length; i++) {
     const decision = splitDecisions[i];
-    if (decision === 'keep') {
+    if (decision === 'keep' || decision === 'duplicate') {
       continue;
     }
     if (!Array.isArray(decision) || decision.length === 0) {
-      throw new Error(`Invalid split decision at index ${i}: expected "keep" or array of strings, got ${typeof decision}`);
+      throw new Error(`Invalid split decision at index ${i}: expected "keep", "duplicate", or array of strings, got ${typeof decision}`);
     }
     for (let j = 0; j < decision.length; j++) {
       if (typeof decision[j] !== 'string') {
@@ -393,6 +404,7 @@ export async function splitSegmentsSequentially(
   }
 
   const results: ClassifiedSegment[] = [];
+  let totalDuplicatesFiltered = 0;
 
   for (let i = 0; i < classifiedSegments.length; i += BATCH_SIZE_SPLIT) {
     const batchEnd = Math.min(i + BATCH_SIZE_SPLIT, classifiedSegments.length);
@@ -406,11 +418,17 @@ export async function splitSegmentsSequentially(
     const splitDecisions = await splitSegmentsBatch(batch, contextBefore, contextAfter, geminiClient);
 
     // Process each segment based on split decision
+    let batchDuplicatesFiltered = 0;
     for (let j = 0; j < batch.length; j++) {
       const segment = batch[j];
       const decision = splitDecisions[j];
 
-      if (decision === 'keep') {
+      if (decision === 'duplicate') {
+        // Skip creating segment - it's a duplicate
+        batchDuplicatesFiltered++;
+        totalDuplicatesFiltered++;
+        console.log(`[Deduplication] LLM marked segment as duplicate: "${segment.text.substring(0, 50)}${segment.text.length > 50 ? '...' : ''}"`);
+      } else if (decision === 'keep') {
         // Keep segment as-is
         results.push(segment);
       } else if (Array.isArray(decision)) {
@@ -447,6 +465,14 @@ export async function splitSegmentsSequentially(
         }
       }
     }
+
+    if (batchDuplicatesFiltered > 0) {
+      console.log(`[Deduplication] Filtered ${batchDuplicatesFiltered} duplicate segment(s) from batch of ${batch.length} segments`);
+    }
+  }
+
+  if (totalDuplicatesFiltered > 0) {
+    console.log(`[Deduplication] Total: Filtered ${totalDuplicatesFiltered} duplicate segment(s) from ${classifiedSegments.length} total segments`);
   }
 
   return results;
@@ -566,4 +592,134 @@ Selection:`;
     selectedIndex: selection.selectedIndex,
     rationale: selection.rationale
   };
+}
+
+/**
+ * Select the best locations for multiple comments using Gemini (batch processing)
+ */
+export async function selectCommentLocationsBatch(
+  segments: Array<{
+    commentText: string;
+    classification: SegmentClassification;
+    timestamp: number;
+    fileName: string;
+  }>,
+  allCandidates: Array<CandidateLocation[]>,
+  geminiClient: GoogleGenerativeAI
+): Promise<Array<{ selectedIndex: number; rationale?: string }>> {
+  console.log(`[Location Selection Batch] Processing ${segments.length} comment location selections`);
+
+  if (segments.length === 0) {
+    return [];
+  }
+
+  if (segments.length !== allCandidates.length) {
+    throw new Error(`Mismatch: ${segments.length} segments but ${allCandidates.length} candidate arrays`);
+  }
+
+  // Build prompt for batch processing
+  const segmentDescriptions = segments.map((segment, idx) => {
+    const candidates = allCandidates[idx];
+    const candidateDescriptions = candidates.map((candidate, candIdx) => {
+      const codeContext = candidate.codeContext || '(No code context available)';
+      return `  Candidate [${candIdx}]:
+    - File: ${candidate.file}
+    - Timestamp: ${candidate.timestamp.toFixed(2)}s
+    - Cursor Line: ${candidate.cursorLine}
+    - Visible Range: Lines ${candidate.visibleRange[0]}-${candidate.visibleRange[1]}
+    - Symbols in View: ${candidate.symbolsInView.join(', ') || '(none)'}
+    - Code Context:
+${codeContext.split('\n').map(line => `      ${line}`).join('\n')}`;
+    }).join('\n\n');
+
+    return `Segment [${idx}]:
+- Text: "${segment.commentText}"
+- Classification: ${segment.classification}
+- File: ${segment.fileName}
+- Timestamp: ${segment.timestamp.toFixed(2)}s
+- Candidates:
+${candidateDescriptions}`;
+  }).join('\n\n---\n\n');
+
+  const prompt = `You are selecting the best locations for multiple code review comments in a codebase.
+
+For each segment below, select the most appropriate location from its candidate locations. Consider:
+- How relevant the comment is to the code context at each location
+- Whether the comment addresses code that was visible when the comment was made
+- The semantic relationship between the comment and the code symbols/functions visible
+- Prefer locations where the code context matches the comment's intent
+
+Segments to process:
+${segmentDescriptions}
+
+Return a JSON array with exactly ${segments.length} element(s), one for each segment in order. Each element must be a JSON object with:
+- "selectedIndex": The index (0-based) of the best candidate location for that segment
+- "rationale": A brief explanation (1-2 sentences) of why this location was chosen (optional)
+
+Example response for 2 segments:
+[
+  {
+    "selectedIndex": 2,
+    "rationale": "This location is best because the comment addresses the error handling function that was visible at this timestamp."
+  },
+  {
+    "selectedIndex": 0,
+    "rationale": "The comment relates to the function definition visible at the cursor position."
+  }
+]
+
+Return ONLY the JSON array, no other text, no markdown, no explanations.
+
+Selections:`;
+
+  console.log(`[Location Selection Batch] Calling Gemini API with prompt (${prompt.length} chars)...`);
+  const model = geminiClient.getGenerativeModel({ model: GEMINI_MODEL });
+  const result = await model.generateContent(prompt);
+  const response = await result.response;
+  const text = response.text();
+  console.log(`[Location Selection Batch] Received response from Gemini (${text.length} chars)`);
+
+  // Parse JSON response
+  let selections: Array<{ selectedIndex: number; rationale?: string }>;
+  try {
+    // Extract JSON from response (might have markdown code blocks)
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+      selections = JSON.parse(jsonMatch[0]);
+      console.log(`[Location Selection Batch] Parsed JSON from response (extracted from markdown)`);
+    } else {
+      selections = JSON.parse(text);
+      console.log(`[Location Selection Batch] Parsed JSON directly from response`);
+    }
+  } catch (error) {
+    console.error('[Location Selection Batch] ERROR: Failed to parse Gemini response');
+    console.error('[Location Selection Batch] Raw response:', text);
+    throw new Error(`Failed to parse batch location selection response: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+
+  // Validate response
+  if (!Array.isArray(selections)) {
+    throw new Error(`Expected array, got ${typeof selections}`);
+  }
+
+  if (selections.length !== segments.length) {
+    throw new Error(`Expected ${segments.length} selections, got ${selections.length}`);
+  }
+
+  // Validate each selection
+  for (let i = 0; i < selections.length; i++) {
+    const selection = selections[i];
+    const candidates = allCandidates[i];
+
+    if (typeof selection.selectedIndex !== 'number') {
+      throw new Error(`Invalid selectedIndex at index ${i}: expected number, got ${typeof selection.selectedIndex}`);
+    }
+
+    if (selection.selectedIndex < 0 || selection.selectedIndex >= candidates.length) {
+      throw new Error(`Selected index ${selection.selectedIndex} at segment ${i} is out of range (0-${candidates.length - 1})`);
+    }
+  }
+
+  console.log(`[Location Selection Batch] ✓ Successfully processed ${selections.length} location selections`);
+  return selections;
 }

@@ -8,7 +8,7 @@ import { createTranscribeRoute } from './routes/transcribe';
 import { createClassifyRoute } from './routes/classify';
 import { createTransformRoute } from './routes/transform';
 import { createSplitRoute } from './routes/split';
-import { createLocationRoute } from './routes/location';
+import { createLocationRoute, createBatchLocationRoute } from './routes/location';
 import { errorHandler } from './middleware/errorHandler';
 
 // Load environment variables
@@ -86,6 +86,7 @@ app.post('/classify', createClassifyRoute(geminiClient));
 app.post('/transform', createTransformRoute(geminiClient));
 app.post('/split', createSplitRoute(geminiClient));
 app.post('/select-comment-location', createLocationRoute(geminiClient));
+app.post('/select-comment-locations', createBatchLocationRoute(geminiClient));
 
 // Error handling middleware (must be last)
 app.use(errorHandler);

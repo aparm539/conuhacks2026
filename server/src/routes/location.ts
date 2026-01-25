@@ -1,7 +1,15 @@
 import type { Request, Response } from 'express';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { selectCommentLocation } from '../services/gemini';
-import type { LocationSelectionRequest, LocationSelectionResponse, LocationSelectionErrorResponse, SegmentClassification } from '../types/index';
+import { selectCommentLocation, selectCommentLocationsBatch } from '../services/gemini';
+import type { 
+  LocationSelectionRequest, 
+  LocationSelectionResponse, 
+  LocationSelectionErrorResponse,
+  BatchLocationSelectionRequest,
+  BatchLocationSelectionResponse,
+  BatchLocationSelectionErrorResponse,
+  SegmentClassification 
+} from '../types/index';
 import { VALID_CLASSIFICATIONS } from '../types';
 import { asyncHandler } from '../middleware/errorHandler';
 
@@ -94,6 +102,113 @@ export function createLocationRoute(geminiClient: GoogleGenerativeAI | null) {
         selectedIndex: 0,
         error: `Location selection failed: ${errorMessage}` 
       } as LocationSelectionErrorResponse);
+    }
+  });
+}
+
+export function createBatchLocationRoute(geminiClient: GoogleGenerativeAI | null) {
+  return asyncHandler(async (
+    req: Request<{}, BatchLocationSelectionResponse, BatchLocationSelectionRequest>,
+    res: Response<BatchLocationSelectionResponse | BatchLocationSelectionErrorResponse>
+  ) => {
+    console.log(`[API] POST /select-comment-locations - Batch request received`);
+    
+    if (!geminiClient) {
+      console.error('[API] ERROR: Gemini client not initialized');
+      return res.status(500).json({ 
+        locations: [],
+        error: 'Gemini client not initialized. Check server logs for API key errors.' 
+      } as BatchLocationSelectionErrorResponse);
+    }
+
+    const { segments, candidates } = req.body;
+    console.log(`[API] Request body: ${segments?.length || 0} segment(s), ${candidates?.length || 0} candidate array(s)`);
+
+    if (!segments || !Array.isArray(segments) || segments.length === 0) {
+      console.error('[API] ERROR: Missing or invalid segments');
+      return res.status(400).json({ 
+        locations: [],
+        error: 'Missing or invalid segments. Expected non-empty array.' 
+      } as BatchLocationSelectionErrorResponse);
+    }
+
+    if (!candidates || !Array.isArray(candidates) || candidates.length !== segments.length) {
+      console.error(`[API] ERROR: Mismatch between segments (${segments.length}) and candidates (${candidates?.length || 0})`);
+      return res.status(400).json({ 
+        locations: [],
+        error: `Mismatch: ${segments.length} segments but ${candidates?.length || 0} candidate arrays. Expected equal counts.` 
+      } as BatchLocationSelectionErrorResponse);
+    }
+
+    // Validate segment structure
+    console.log(`[API] Validating ${segments.length} segment(s)...`);
+    for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i];
+      if (
+        typeof segment.commentText !== 'string' ||
+        !segment.classification ||
+        !VALID_CLASSIFICATIONS.includes(segment.classification) ||
+        typeof segment.timestamp !== 'number' ||
+        typeof segment.fileName !== 'string'
+      ) {
+        console.error(`[API] ERROR: Invalid segment structure at index ${i}`);
+        return res.status(400).json({ 
+          locations: [],
+          error: `Invalid segment structure at index ${i}. Expected { commentText: string, classification: SegmentClassification, timestamp: number, fileName: string }` 
+        } as BatchLocationSelectionErrorResponse);
+      }
+    }
+
+    // Validate candidate arrays
+    console.log(`[API] Validating ${candidates.length} candidate array(s)...`);
+    for (let i = 0; i < candidates.length; i++) {
+      const candidateArray = candidates[i];
+      if (!Array.isArray(candidateArray) || candidateArray.length === 0) {
+        console.error(`[API] ERROR: Invalid candidate array at index ${i}: ${candidateArray ? 'empty array' : 'not array'}`);
+        return res.status(400).json({ 
+          locations: [],
+          error: `Invalid candidate array at index ${i}. Expected non-empty array of CandidateLocation.` 
+        } as BatchLocationSelectionErrorResponse);
+      }
+
+      // Validate each candidate in the array
+      for (let j = 0; j < candidateArray.length; j++) {
+        const candidate = candidateArray[j];
+        if (
+          typeof candidate.timestamp !== 'number' ||
+          typeof candidate.file !== 'string' ||
+          typeof candidate.cursorLine !== 'number' ||
+          !Array.isArray(candidate.visibleRange) ||
+          candidate.visibleRange.length !== 2 ||
+          !Array.isArray(candidate.symbolsInView) ||
+          typeof candidate.codeContext !== 'string'
+        ) {
+          console.error(`[API] ERROR: Invalid candidate structure at segment ${i}, candidate ${j}`);
+          return res.status(400).json({ 
+            locations: [],
+            error: `Invalid candidate structure at segment ${i}, candidate ${j}. Expected CandidateLocation with all required fields.` 
+          } as BatchLocationSelectionErrorResponse);
+        }
+      }
+    }
+    console.log(`[API] ✓ All segments and candidates validated successfully`);
+
+    try {
+      console.log(`[API] Calling selectCommentLocationsBatch function...`);
+      const locations = await selectCommentLocationsBatch(
+        segments,
+        candidates,
+        geminiClient
+      );
+      console.log(`[API] ✓ Batch location selection completed: ${locations.length} location(s)`);
+      res.json({ locations });
+    } catch (error) {
+      console.error('[API] ERROR: Batch location selection failed:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      res.status(500).json({ 
+        locations: [],
+        error: `Batch location selection failed: ${errorMessage}` 
+      } as BatchLocationSelectionErrorResponse);
     }
   });
 }
