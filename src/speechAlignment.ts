@@ -451,3 +451,179 @@ export async function findCommentLocation(
 	const firstLine = document.lineAt(0);
 	return new vscode.Range(0, 0, 0, firstLine.text.length);
 }
+
+/**
+ * Find the best locations for multiple comments using batch API
+ * Returns an array of ranges corresponding to each segment
+ */
+export async function findCommentLocationsBatch(
+	segments: TransformedSegment[],
+	contexts: RecordingContext[],
+	document: vscode.TextDocument,
+	currentFile: string,
+	serverUrl: string = 'http://localhost:3000'
+): Promise<vscode.Range[]> {
+	const lineCount = document.lineCount;
+
+	// Extract candidate contexts for all segments
+	const allCandidateContexts = segments.map(segment => 
+		findNearestContexts(segment.startTime, contexts, 5, currentFile)
+	);
+
+	// Extract code context for all candidates in parallel
+	const allCandidates = await Promise.all(
+		allCandidateContexts.map(async (candidateContexts) => {
+			if (candidateContexts.length === 0) {
+				return [];
+			}
+			return Promise.all(
+				candidateContexts.map(async (context) => {
+					const codeContext = await extractCodeContext(context, document);
+					return {
+						timestamp: context.timestamp,
+						file: context.file,
+						cursorLine: context.cursorLine,
+						visibleRange: context.visibleRange,
+						symbolsInView: context.symbolsInView,
+						codeContext: codeContext
+					};
+				})
+			);
+		})
+	);
+
+	// Prepare batch request
+	const batchSegments = segments.map(segment => ({
+		commentText: segment.transformedText,
+		classification: segment.classification,
+		timestamp: segment.startTime,
+		fileName: currentFile
+	}));
+
+	// Call batch API
+	try {
+		const response = await fetch(`${serverUrl}/select-comment-locations`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				segments: batchSegments,
+				candidates: allCandidates,
+			}),
+		});
+
+		if (!response.ok) {
+			throw new Error(`HTTP error! status: ${response.status}`);
+		}
+
+		const data = await response.json() as { locations: Array<{ selectedIndex: number; rationale?: string }> };
+		
+		if (!data.locations || !Array.isArray(data.locations) || data.locations.length !== segments.length) {
+			throw new Error(`Invalid response: expected ${segments.length} locations, got ${data.locations?.length || 0}`);
+		}
+
+		// Convert selected indices to ranges
+		const ranges: vscode.Range[] = [];
+		for (let i = 0; i < segments.length; i++) {
+			const location = data.locations[i];
+			const candidateContexts = allCandidateContexts[i];
+			const selectedCandidate = candidateContexts[location.selectedIndex];
+
+			if (!selectedCandidate) {
+				// Fallback to file-level
+				const firstLine = document.lineAt(0);
+				ranges.push(new vscode.Range(0, 0, 0, firstLine.text.length));
+				continue;
+			}
+
+			// Convert to range - prefer cursor line, then visible symbols, then visible range
+			if (selectedCandidate.cursorLine >= 0 && selectedCandidate.cursorLine < lineCount) {
+				const line = document.lineAt(selectedCandidate.cursorLine);
+				ranges.push(new vscode.Range(
+					selectedCandidate.cursorLine,
+					0,
+					selectedCandidate.cursorLine,
+					line.text.length
+				));
+				continue;
+			}
+
+			// Try visible symbols
+			if (selectedCandidate.symbolsInView && selectedCandidate.symbolsInView.length > 0) {
+				try {
+					const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+						'vscode.executeDocumentSymbolProvider',
+						document.uri
+					);
+
+					if (symbols && Array.isArray(symbols)) {
+						const findSymbolByName = (
+							symbols: vscode.DocumentSymbol[],
+							name: string
+						): vscode.DocumentSymbol | null => {
+							for (const symbol of symbols) {
+								if (symbol.name === name) {
+									return symbol;
+								}
+								if (symbol.children && symbol.children.length > 0) {
+									const found = findSymbolByName(symbol.children, name);
+									if (found) {
+										return found;
+									}
+								}
+							}
+							return null;
+						};
+
+						for (const symbolName of selectedCandidate.symbolsInView) {
+							const symbol = findSymbolByName(symbols, symbolName);
+							if (symbol) {
+								const line = document.lineAt(symbol.range.start.line);
+								ranges.push(new vscode.Range(
+									symbol.range.start.line,
+									0,
+									symbol.range.start.line,
+									line.text.length
+								));
+								break;
+							}
+						}
+						if (ranges.length === i + 1) {
+							continue; // Found a symbol, move to next segment
+						}
+					}
+				} catch (error) {
+					console.warn('Failed to query document symbols for comment placement:', error);
+				}
+			}
+
+			// Fallback to visible range start
+			if (selectedCandidate.visibleRange[0] >= 0 && selectedCandidate.visibleRange[0] < lineCount) {
+				const line = document.lineAt(selectedCandidate.visibleRange[0]);
+				ranges.push(new vscode.Range(
+					selectedCandidate.visibleRange[0],
+					0,
+					selectedCandidate.visibleRange[0],
+					line.text.length
+				));
+				continue;
+			}
+
+			// Final fallback: file-level
+			const firstLine = document.lineAt(0);
+			ranges.push(new vscode.Range(0, 0, 0, firstLine.text.length));
+		}
+
+		return ranges;
+	} catch (error) {
+		console.warn('Failed to use batch API for location selection, falling back to individual calls:', error);
+		// Fallback to individual calls
+		const ranges: vscode.Range[] = [];
+		for (const segment of segments) {
+			const range = await findCommentLocation(segment, contexts, document, currentFile, serverUrl);
+			ranges.push(range);
+		}
+		return ranges;
+	}
+}

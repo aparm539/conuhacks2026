@@ -9,7 +9,7 @@ import { DiarizationApiClient } from './apiClient';
 import { createStatusBarItem, updateStatusBar, showStatusBarMenu, StatusBarCallbacks } from './statusBar';
 import { getSelectedDevice, selectAudioDevice, listAudioDevices } from './audioDeviceManager';
 import { ContextCollector, RecordingContext } from './contextCollector';
-import { WordInfo, SpeakerSegment, ClassifiedSegment, TransformedSegment, groupWordsBySpeaker, findCommentLocation } from './speechAlignment';
+import { WordInfo, SpeakerSegment, ClassifiedSegment, TransformedSegment, groupWordsBySpeaker, findCommentLocation, findCommentLocationsBatch } from './speechAlignment';
 
 const TRANSCRIPTION_SERVER_URL = 'http://localhost:3000';
 
@@ -95,16 +95,19 @@ export function activate(context: vscode.ExtensionContext) {
 			return;
 		}
 
-		// Create a comment for each transformed segment
-		for (const segment of segmentsToComment) {
-			// Find best location for comment using Gemini API
-			const range = await findCommentLocation(
-				segment,
-				contexts,
-				document,
-				currentFile || '',
-				TRANSCRIPTION_SERVER_URL
-			);
+		// Find all comment locations in parallel using batch API
+		const ranges = await findCommentLocationsBatch(
+			segmentsToComment,
+			contexts,
+			document,
+			currentFile || '',
+			TRANSCRIPTION_SERVER_URL
+		);
+
+		// Create comments for all segments (display incrementally as they're created)
+		for (let i = 0; i < segmentsToComment.length; i++) {
+			const segment = segmentsToComment[i];
+			const range = ranges[i];
 
 			// Format comment text with speaker label using transformed text
 			const commentText = `**Speaker ${segment.speakerTag}:** ${segment.transformedText}`;
@@ -119,6 +122,9 @@ export function activate(context: vscode.ExtensionContext) {
 			// Create comment thread at the determined location
 			commentController.createCommentThread(document.uri, range, [comment]);
 		}
+
+		// Show completion message
+		vscode.window.showInformationMessage(`Created ${segmentsToComment.length} comment(s) in ${currentFile}`);
 	}
 
 	async function transcribeAudio(audioData: Buffer, audioFilePath: string): Promise<WordInfo[]> {
@@ -288,26 +294,44 @@ export function activate(context: vscode.ExtensionContext) {
 
 				console.log(recordingsUri); 
 				
-				// Write the file
+				// Prepare file names and data
 				const fileName = `${Date.now()}.wav`;
 				const fileUri = vscode.Uri.joinPath(recordingsUri, fileName);
-				await vscode.workspace.fs.writeFile(fileUri, audioData);
-				
-				vscode.window.showInformationMessage(`Recording saved: ${fileName}`);
-
-				// Save context file 
 				const contextsToUse = pendingContext; // Store before clearing
-				if (pendingContext && pendingContext.length > 0) {
+				pendingContext = null;
+
+				// Prepare context file data if available
+				const fileWritePromises: Promise<void>[] = [
+					new Promise<void>((resolve, reject) => {
+						vscode.workspace.fs.writeFile(fileUri, audioData).then(() => {
+							vscode.window.showInformationMessage(`Recording saved: ${fileName}`);
+							resolve();
+						}, reject);
+					})
+				];
+
+				if (contextsToUse && contextsToUse.length > 0) {
 					const contextFileName = fileName.replace('.wav', '.context.json');
 					const contextUri = vscode.Uri.joinPath(recordingsUri, contextFileName);
-					const contextJson = JSON.stringify(pendingContext, null, 2);
+					const contextJson = JSON.stringify(contextsToUse, null, 2);
 					const contextBuffer = Buffer.from(contextJson, 'utf8');
-					await vscode.workspace.fs.writeFile(contextUri, contextBuffer);
-					console.log(`Context saved: ${contextFileName}`);
+					fileWritePromises.push(
+						new Promise<void>((resolve, reject) => {
+							vscode.workspace.fs.writeFile(contextUri, contextBuffer).then(() => {
+								console.log(`Context saved: ${contextFileName}`);
+								resolve();
+							}, reject);
+						})
+					);
 				}
-				pendingContext = null;
+
+				// Start file writes in parallel (don't await yet - start transcription immediately)
+				// File writes will complete in background
+				Promise.all(fileWritePromises).catch(err => {
+					console.error('Error saving files:', err);
+				});
 				
-				// Transcribe the audio
+				// Transcribe the audio (start immediately, don't wait for file writes)
 				try {
 					const words = await transcribeAudio(audioData, fileName);
 					
@@ -325,68 +349,91 @@ export function activate(context: vscode.ExtensionContext) {
 						formattedTranscript += wordInfo.word + ' ';
 					}
 					
-					// Save transcript as .txt file with same base name
+					// Save transcript as .txt file (add to parallel file writes)
 					const transcriptFileName = fileName.replace('.wav', '.txt');
 					const transcriptUri = vscode.Uri.joinPath(recordingsUri, transcriptFileName);
 					const transcriptBuffer = Buffer.from(formattedTranscript.trim(), 'utf8');
-					await vscode.workspace.fs.writeFile(transcriptUri, transcriptBuffer);
+					fileWritePromises.push(
+						new Promise<void>((resolve, reject) => {
+							vscode.workspace.fs.writeFile(transcriptUri, transcriptBuffer).then(() => {
+								vscode.window.showInformationMessage(`Transcript saved: ${transcriptFileName}`);
+								resolve();
+							}, reject);
+						})
+					);
+
+					// Wait for all file writes to complete (including transcript)
+					await Promise.all(fileWritePromises);
 					
-					vscode.window.showInformationMessage(`Transcript saved: ${transcriptFileName}`);
-					
-					// Group words by speaker segments
-					const segments = groupWordsBySpeaker(words);
-					console.log(`[EXTENSION] Grouped ${words.length} words into ${segments.length} segments`);
-					
-					if (segments.length === 0) {
-						vscode.window.showWarningMessage('No speech segments found after grouping words. This might indicate an issue with the transcription.');
-						return;
-					}
-					
-					// Classify segments
-					let classifiedSegments: ClassifiedSegment[];
-					try {
-						classifiedSegments = await classifySegments(segments);
-						console.log(`[EXTENSION] Classified ${segments.length} segments into ${classifiedSegments.length} classified segments`);
-					} catch (error) {
-						console.error('Classification failed:', error);
-						const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-						vscode.window.showErrorMessage(`Failed to classify speech segments: ${errorMessage}`);
-						return;
-					}
-					
-					// Split segments based on topic and context
-					let splitClassifiedSegments: ClassifiedSegment[];
-					try {
-						splitClassifiedSegments = await splitSegments(classifiedSegments);
-						console.log(`[EXTENSION] Split ${classifiedSegments.length} segments into ${splitClassifiedSegments.length} split segments`);
-					} catch (error) {
-						console.error('Splitting failed:', error);
-						const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-						vscode.window.showErrorMessage(`Failed to split speech segments: ${errorMessage}`);
-						return;
-					}
-					
-					// Transform segments
-					let transformedSegments: TransformedSegment[];
-					try {
-						transformedSegments = await transformSegments(splitClassifiedSegments);
-						console.log(`[EXTENSION] Transformed ${splitClassifiedSegments.length} segments into ${transformedSegments.length} transformed segments`);
+					// Process audio with progress notifications
+					await vscode.window.withProgress({
+						location: vscode.ProgressLocation.Notification,
+						title: "Processing Audio",
+						cancellable: false
+					}, async (progress) => {
+						// Group words by speaker segments
+						progress.report({ increment: 0, message: "Grouping words into segments..." });
+						const segments = groupWordsBySpeaker(words);
+						console.log(`[EXTENSION] Grouped ${words.length} words into ${segments.length} segments`);
 						
-						// Log classification breakdown
-						const classificationCounts = transformedSegments.reduce((acc, seg) => {
-							acc[seg.classification] = (acc[seg.classification] || 0) + 1;
-							return acc;
-						}, {} as Record<string, number>);
-						console.log(`[EXTENSION] Classification breakdown:`, classificationCounts);
-					} catch (error) {
-						console.error('Transformation failed:', error);
-						const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-						vscode.window.showErrorMessage(`Failed to transform speech segments: ${errorMessage}`);
-						return;
-					}
-					
-					// Create comments aligned to code using context snapshots with transformed text
-					await createComments(transformedSegments, contextsToUse || []);
+						if (segments.length === 0) {
+							vscode.window.showWarningMessage('No speech segments found after grouping words. This might indicate an issue with the transcription.');
+							return;
+						}
+						
+						// Classify segments
+						progress.report({ increment: 20, message: `Classifying ${segments.length} segments...` });
+						let classifiedSegments: ClassifiedSegment[];
+						try {
+							classifiedSegments = await classifySegments(segments);
+							console.log(`[EXTENSION] Classified ${segments.length} segments into ${classifiedSegments.length} classified segments`);
+						} catch (error) {
+							console.error('Classification failed:', error);
+							const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+							vscode.window.showErrorMessage(`Failed to classify speech segments: ${errorMessage}`);
+							return;
+						}
+						
+						// Split segments based on topic and context
+						progress.report({ increment: 20, message: `Splitting ${classifiedSegments.length} segments...` });
+						let splitClassifiedSegments: ClassifiedSegment[];
+						try {
+							splitClassifiedSegments = await splitSegments(classifiedSegments);
+							console.log(`[EXTENSION] Split ${classifiedSegments.length} segments into ${splitClassifiedSegments.length} split segments`);
+						} catch (error) {
+							console.error('Splitting failed:', error);
+							const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+							vscode.window.showErrorMessage(`Failed to split speech segments: ${errorMessage}`);
+							return;
+						}
+						
+						// Transform segments
+						progress.report({ increment: 20, message: `Transforming ${splitClassifiedSegments.length} segments...` });
+						let transformedSegments: TransformedSegment[];
+						try {
+							transformedSegments = await transformSegments(splitClassifiedSegments);
+							console.log(`[EXTENSION] Transformed ${splitClassifiedSegments.length} segments into ${transformedSegments.length} transformed segments`);
+							
+							// Log classification breakdown
+							const classificationCounts = transformedSegments.reduce((acc, seg) => {
+								acc[seg.classification] = (acc[seg.classification] || 0) + 1;
+								return acc;
+							}, {} as Record<string, number>);
+							console.log(`[EXTENSION] Classification breakdown:`, classificationCounts);
+						} catch (error) {
+							console.error('Transformation failed:', error);
+							const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+							vscode.window.showErrorMessage(`Failed to transform speech segments: ${errorMessage}`);
+							return;
+						}
+						
+						// Create comments aligned to code using context snapshots with transformed text
+						const segmentsToComment = transformedSegments.filter(seg => seg.classification !== 'Ignore');
+						progress.report({ increment: 20, message: `Finding locations for ${segmentsToComment.length} comments...` });
+						await createComments(transformedSegments, contextsToUse || []);
+						
+						progress.report({ increment: 20, message: "Complete!" });
+					});
 				} catch (error) {
 					console.error('Transcription failed:', error);
 					const errorMessage = error instanceof Error ? error.message : 'Unknown error';

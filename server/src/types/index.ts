@@ -72,6 +72,23 @@ export interface LocationSelectionResponse {
   rationale?: string;
 }
 
+export interface BatchLocationSelectionRequest {
+  segments: Array<{
+    commentText: string;
+    classification: SegmentClassification;
+    timestamp: number;
+    fileName: string;
+  }>;
+  candidates: Array<CandidateLocation[]>;
+}
+
+export interface BatchLocationSelectionResponse {
+  locations: Array<{
+    selectedIndex: number;
+    rationale?: string;
+  }>;
+}
+
 // Error response types
 export interface ClassificationErrorResponse extends ClassificationResponse {
   classifiedSegments: [];
@@ -90,6 +107,11 @@ export interface SplitErrorResponse extends SplitResponse {
 
 export interface LocationSelectionErrorResponse extends LocationSelectionResponse {
   selectedIndex: 0;
+  error: string;
+}
+
+export interface BatchLocationSelectionErrorResponse extends BatchLocationSelectionResponse {
+  locations: [];
   error: string;
 }
 
