@@ -10,14 +10,17 @@ import { createStatusBarItem, updateStatusBar, showStatusBarMenu, StatusBarCallb
 import { getSession, getAuthState, onSessionChange, registerSessionChangeListener } from './githubAuth';
 import { getSelectedDevice, selectAudioDevice, listAudioDevices } from './audioDeviceManager';
 import { ContextCollector, RecordingContext } from './contextCollector';
-import { WordInfo, SpeakerSegment, ClassifiedSegment, TransformedSegment, groupWordsBySpeaker, findCommentLocation, findCommentLocationsBatch } from './speechAlignment';
+import { WordInfo, SpeakerSegment, ClassifiedSegment, TransformedSegment, groupWordsBySpeaker, findCommentLocationsBatch, GEMINI_KEY_ERROR_MSG } from './speechAlignment';
 import { getPrContext } from './gitHubPrContext';
 import { postReviewComments, type ReviewCommentInput } from './githubPrComments';
 import { getRepositoryRelativePath } from './utils/filePath';
-
-const TRANSCRIPTION_SERVER_URL = 'http://localhost:3000';
+import { initializeGeminiKeyStorage, getGeminiApiKey, setGeminiApiKey, clearGeminiApiKey } from './geminiKey';
 
 let audioService: AudioService;
+
+function getTranscriptionServerUrl(): string {
+	return vscode.workspace.getConfiguration('pr-notes').get<string>('transcriptionServerUrl') ?? 'http://localhost:3000';
+}
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -26,6 +29,8 @@ export function activate(context: vscode.ExtensionContext) {
 	// Use the console to output diagnostic information (console.log) and errors (console.error)
 	// This line of code will only be executed once when your extension is activated
 	console.log('PR Notes extension is now active!');
+
+	initializeGeminiKeyStorage(context);
 
 	// Initialize audio service for diarisation
 	const apiClient = new DiarizationApiClient();
@@ -76,7 +81,7 @@ export function activate(context: vscode.ExtensionContext) {
 		refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 	}));
 
-	async function createComments(transformedSegments: TransformedSegment[], contexts: RecordingContext[]): Promise<void> {
+	async function createComments(transformedSegments: TransformedSegment[], contexts: RecordingContext[], apiKey: string): Promise<void> {
 		const editor = vscode.window.activeTextEditor;
 		if (!editor) {
 			vscode.window.showWarningMessage('No active editor found. Please open a file to add comments.');
@@ -107,7 +112,8 @@ export function activate(context: vscode.ExtensionContext) {
 			contexts,
 			document,
 			currentFile || '',
-			TRANSCRIPTION_SERVER_URL
+			getTranscriptionServerUrl(),
+			apiKey
 		);
 
 		// Build GitHub review comment payload (path, 1-based line, body) and create VS Code threads
@@ -178,9 +184,9 @@ export function activate(context: vscode.ExtensionContext) {
 
 	async function transcribeAudio(audioData: Buffer, audioFilePath: string): Promise<WordInfo[]> {
 		const audioBase64 = audioData.toString('base64');
-		
+		const baseUrl = getTranscriptionServerUrl();
 		try {
-			const response = await fetch(`${TRANSCRIPTION_SERVER_URL}/transcribe`, {
+			const response = await fetch(`${baseUrl}/transcribe`, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
@@ -210,18 +216,22 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	}
 
-	async function classifySegments(segments: SpeakerSegment[]): Promise<ClassifiedSegment[]> {
+	async function classifySegments(segments: SpeakerSegment[], apiKey: string): Promise<ClassifiedSegment[]> {
 		try {
-			const response = await fetch(`${TRANSCRIPTION_SERVER_URL}/classify`, {
+			const response = await fetch(`${getTranscriptionServerUrl()}/classify`, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
+					'X-Gemini-Api-Key': apiKey,
 				},
 				body: JSON.stringify({
 					segments: segments,
 				}),
 			});
 
+			if (response.status === 401) {
+				throw new Error(GEMINI_KEY_ERROR_MSG);
+			}
 			if (!response.ok) {
 				const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
 				throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
@@ -242,18 +252,22 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	}
 
-	async function transformSegments(classifiedSegments: ClassifiedSegment[]): Promise<TransformedSegment[]> {
+	async function transformSegments(classifiedSegments: ClassifiedSegment[], apiKey: string): Promise<TransformedSegment[]> {
 		try {
-			const response = await fetch(`${TRANSCRIPTION_SERVER_URL}/transform`, {
+			const response = await fetch(`${getTranscriptionServerUrl()}/transform`, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
+					'X-Gemini-Api-Key': apiKey,
 				},
 				body: JSON.stringify({
 					classifiedSegments: classifiedSegments,
 				}),
 			});
 
+			if (response.status === 401) {
+				throw new Error(GEMINI_KEY_ERROR_MSG);
+			}
 			if (!response.ok) {
 				const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
 				throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
@@ -274,18 +288,22 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	}
 
-	async function splitSegments(classifiedSegments: ClassifiedSegment[]): Promise<ClassifiedSegment[]> {
+	async function splitSegments(classifiedSegments: ClassifiedSegment[], apiKey: string): Promise<ClassifiedSegment[]> {
 		try {
-			const response = await fetch(`${TRANSCRIPTION_SERVER_URL}/split`, {
+			const response = await fetch(`${getTranscriptionServerUrl()}/split`, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
+					'X-Gemini-Api-Key': apiKey,
 				},
 				body: JSON.stringify({
 					classifiedSegments: classifiedSegments,
 				}),
 			});
 
+			if (response.status === 401) {
+				throw new Error(GEMINI_KEY_ERROR_MSG);
+			}
 			if (!response.ok) {
 				const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
 				throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
@@ -304,6 +322,22 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 			throw error;
 		}
+	}
+
+	async function ensureGeminiKey(): Promise<string | null> {
+		const key = await getGeminiApiKey();
+		if (key) {return key;}
+		const chosen = await vscode.window.showQuickPick(
+			[
+				{ label: 'Set Gemini API Key', detail: 'Opens prompt to enter your Gemini API key' },
+				{ label: 'Cancel' },
+			],
+			{ title: 'Gemini API key required', placeHolder: GEMINI_KEY_ERROR_MSG }
+		);
+		if (chosen?.label === 'Set Gemini API Key') {
+			await vscode.commands.executeCommand('pr-notes.setGeminiApiKey');
+		}
+		return null;
 	}
 
 	function startServer() {
@@ -429,17 +463,23 @@ export function activate(context: vscode.ExtensionContext) {
 							vscode.window.showWarningMessage('No speech segments found after grouping words. This might indicate an issue with the transcription.');
 							return;
 						}
+
+						const apiKey = await getGeminiApiKey();
+						if (!apiKey) {
+							vscode.window.showErrorMessage(GEMINI_KEY_ERROR_MSG);
+							return;
+						}
 						
 						// Classify segments
 						progress.report({ increment: 20, message: `Classifying ${segments.length} segments...` });
 						let classifiedSegments: ClassifiedSegment[];
 						try {
-							classifiedSegments = await classifySegments(segments);
+							classifiedSegments = await classifySegments(segments, apiKey);
 							console.log(`[EXTENSION] Classified ${segments.length} segments into ${classifiedSegments.length} classified segments`);
 						} catch (error) {
 							console.error('Classification failed:', error);
 							const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-							vscode.window.showErrorMessage(`Failed to classify speech segments: ${errorMessage}`);
+							vscode.window.showErrorMessage(errorMessage === GEMINI_KEY_ERROR_MSG ? GEMINI_KEY_ERROR_MSG : `Failed to classify speech segments: ${errorMessage}`);
 							return;
 						}
 						
@@ -447,12 +487,12 @@ export function activate(context: vscode.ExtensionContext) {
 						progress.report({ increment: 20, message: `Splitting ${classifiedSegments.length} segments...` });
 						let splitClassifiedSegments: ClassifiedSegment[];
 						try {
-							splitClassifiedSegments = await splitSegments(classifiedSegments);
+							splitClassifiedSegments = await splitSegments(classifiedSegments, apiKey);
 							console.log(`[EXTENSION] Split ${classifiedSegments.length} segments into ${splitClassifiedSegments.length} split segments`);
 						} catch (error) {
 							console.error('Splitting failed:', error);
 							const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-							vscode.window.showErrorMessage(`Failed to split speech segments: ${errorMessage}`);
+							vscode.window.showErrorMessage(errorMessage === GEMINI_KEY_ERROR_MSG ? GEMINI_KEY_ERROR_MSG : `Failed to split speech segments: ${errorMessage}`);
 							return;
 						}
 						
@@ -460,7 +500,7 @@ export function activate(context: vscode.ExtensionContext) {
 						progress.report({ increment: 20, message: `Transforming ${splitClassifiedSegments.length} segments...` });
 						let transformedSegments: TransformedSegment[];
 						try {
-							transformedSegments = await transformSegments(splitClassifiedSegments);
+							transformedSegments = await transformSegments(splitClassifiedSegments, apiKey);
 							console.log(`[EXTENSION] Transformed ${splitClassifiedSegments.length} segments into ${transformedSegments.length} transformed segments`);
 							
 							// Log classification breakdown
@@ -472,14 +512,20 @@ export function activate(context: vscode.ExtensionContext) {
 						} catch (error) {
 							console.error('Transformation failed:', error);
 							const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-							vscode.window.showErrorMessage(`Failed to transform speech segments: ${errorMessage}`);
+							vscode.window.showErrorMessage(errorMessage === GEMINI_KEY_ERROR_MSG ? GEMINI_KEY_ERROR_MSG : `Failed to transform speech segments: ${errorMessage}`);
 							return;
 						}
 						
 						// Create comments aligned to code using context snapshots with transformed text
 						const segmentsToComment = transformedSegments.filter(seg => seg.classification !== 'Ignore');
 						progress.report({ increment: 20, message: `Finding locations for ${segmentsToComment.length} comments...` });
-						await createComments(transformedSegments, contextsToUse || []);
+						try {
+							await createComments(transformedSegments, contextsToUse || [], apiKey);
+						} catch (error) {
+							const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+							vscode.window.showErrorMessage(errorMessage === GEMINI_KEY_ERROR_MSG ? GEMINI_KEY_ERROR_MSG : `Failed to find comment locations: ${errorMessage}`);
+							return;
+						}
 						
 						progress.report({ increment: 20, message: "Complete!" });
 					});
@@ -511,8 +557,13 @@ export function activate(context: vscode.ExtensionContext) {
 		});
 	}
 
-	function handleStartRecording() {
+	async function handleStartRecording() {
 		if (isRecording) {
+			return;
+		}
+
+		const key = await ensureGeminiKey();
+		if (!key) {
 			return;
 		}
 
@@ -614,14 +665,17 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 
 		const authState = await getAuthState();
+		const geminiKeySet = !!(await getGeminiApiKey());
 		const callbacks: StatusBarCallbacks = {
 			onStartRecording: handleStartRecording,
 			onStopRecording: handleStopRecording,
 			onSelectDevice: handleSelectDevice,
-			onLogin: handleLogin
+			onLogin: handleLogin,
+			onSetGeminiApiKey: handleSetGeminiApiKey,
+			onClearGeminiApiKey: handleClearGeminiApiKey,
 		};
 
-		await showStatusBarMenu(isRecording, deviceDisplayName, callbacks, authState);
+		await showStatusBarMenu(isRecording, deviceDisplayName, callbacks, authState, geminiKeySet);
 		await refreshStatusBar();
 	});
 
@@ -636,6 +690,36 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const loginDisposable = vscode.commands.registerCommand('pr-notes.login', handleLogin);
 
+	async function handleSetGeminiApiKey(): Promise<void> {
+		const key = await vscode.window.showInputBox({
+			title: 'Gemini API Key',
+			prompt: 'Enter your Gemini API key. It is stored securely in VS Code Secret Storage.',
+			password: true,
+			ignoreFocusOut: true,
+		});
+		if (key === undefined) {return;}
+		const trimmed = key.trim();
+		if (!trimmed) {
+			vscode.window.showWarningMessage('API key cannot be empty.');
+			return;
+		}
+		try {
+			await setGeminiApiKey(trimmed);
+			vscode.window.showInformationMessage('Gemini API key saved.');
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : 'Failed to save key';
+			vscode.window.showErrorMessage(msg);
+		}
+	}
+
+	async function handleClearGeminiApiKey(): Promise<void> {
+		await clearGeminiApiKey();
+		vscode.window.showInformationMessage('Gemini API key cleared.');
+	}
+
+	const setGeminiApiKeyDisposable = vscode.commands.registerCommand('pr-notes.setGeminiApiKey', handleSetGeminiApiKey);
+	const clearGeminiApiKeyDisposable = vscode.commands.registerCommand('pr-notes.clearGeminiApiKey', handleClearGeminiApiKey);
+
 	context.subscriptions.push(statusBarItem);
 	context.subscriptions.push(commentController);
 	context.subscriptions.push(processAudioDisposable);
@@ -643,6 +727,8 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(showMenuDisposable);
 	context.subscriptions.push(helloWorldDisposable);
 	context.subscriptions.push(loginDisposable);
+	context.subscriptions.push(setGeminiApiKeyDisposable);
+	context.subscriptions.push(clearGeminiApiKeyDisposable);
 }
 
 // This method is called when your extension is deactivated

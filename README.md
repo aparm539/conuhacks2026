@@ -16,6 +16,14 @@ For example if there is an image subfolder under your extension project workspac
 
 If you have any requirements or dependencies, add a section describing those and how to install and configure them.
 
+### Gemini API key
+
+You must set your own **Gemini API key** in the extension. The transcription server does **not** use `GEMINI_API_KEY` from env files.
+
+- **Command Palette** → **PR Notes: Set Gemini API Key** (enter your key; it is stored securely in VS Code Secret Storage).
+- Or use the **Recording** status bar menu (mic icon) → **Set Gemini API Key** when no key is configured.
+- To clear it: **PR Notes: Clear Gemini API Key** or the **Clear Gemini API Key** option in the status bar menu.
+
 ## Extension Settings
 
 Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.

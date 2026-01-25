@@ -6,10 +6,12 @@ export interface AuthState {
 }
 
 export interface StatusBarCallbacks {
-	onStartRecording: () => void;
+	onStartRecording: () => void | Promise<void>;
 	onStopRecording: () => void;
 	onSelectDevice: () => Promise<void>;
 	onLogin?: () => Promise<void>;
+	onSetGeminiApiKey?: () => Promise<void>;
+	onClearGeminiApiKey?: () => Promise<void>;
 }
 
 export function createStatusBarItem(): vscode.StatusBarItem {
@@ -50,7 +52,8 @@ export async function showStatusBarMenu(
 	isRecording: boolean,
 	currentDevice: string | undefined,
 	callbacks: StatusBarCallbacks,
-	authState?: AuthState
+	authState?: AuthState,
+	geminiKeySet?: boolean
 ): Promise<void> {
 	const items: vscode.QuickPickItem[] = [];
 
@@ -80,6 +83,31 @@ export async function showStatusBarMenu(
 		description: "Choose a different audio input device"
 	});
 
+	// Gemini API key section
+	if (callbacks.onSetGeminiApiKey || callbacks.onClearGeminiApiKey) {
+		items.push({
+			label: "",
+			kind: vscode.QuickPickItemKind.Separator
+		});
+		if (!geminiKeySet && callbacks.onSetGeminiApiKey) {
+			items.push({
+				label: "$(key) Set Gemini API Key",
+				description: "Required for classification and comment placement"
+			});
+		} else if (geminiKeySet) {
+			items.push({
+				label: "$(check) Gemini API key configured",
+				description: "Key is stored securely"
+			});
+			if (callbacks.onClearGeminiApiKey) {
+				items.push({
+					label: "$(clear-all) Clear Gemini API Key",
+					description: "Remove stored API key"
+				});
+			}
+		}
+	}
+
 	// Auth section
 	items.push({
 		label: "",
@@ -108,12 +136,16 @@ export async function showStatusBarMenu(
 
 	// Handle selection
 	if (selected.label.includes("Start Recording")) {
-		callbacks.onStartRecording();
+		await Promise.resolve(callbacks.onStartRecording());
 	} else if (selected.label.includes("Stop Recording")) {
 		callbacks.onStopRecording();
 	} else if (selected.label.includes("Current Device") || selected.label.includes("Select Input Device")) {
 		await callbacks.onSelectDevice();
 	} else if (selected.label.includes("Sign in with GitHub") && callbacks.onLogin) {
 		await callbacks.onLogin();
+	} else if (selected.label.includes("Set Gemini API Key") && callbacks.onSetGeminiApiKey) {
+		await callbacks.onSetGeminiApiKey();
+	} else if (selected.label.includes("Clear Gemini API Key") && callbacks.onClearGeminiApiKey) {
+		await callbacks.onClearGeminiApiKey();
 	}
 }

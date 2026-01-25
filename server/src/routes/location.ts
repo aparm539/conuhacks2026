@@ -1,30 +1,39 @@
 import type { Request, Response } from 'express';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { selectCommentLocation, selectCommentLocationsBatch } from '../services/gemini';
-import type { 
-  LocationSelectionRequest, 
-  LocationSelectionResponse, 
+import type {
+  LocationSelectionRequest,
+  LocationSelectionResponse,
   LocationSelectionErrorResponse,
   BatchLocationSelectionRequest,
   BatchLocationSelectionResponse,
   BatchLocationSelectionErrorResponse,
-  SegmentClassification 
+  SegmentClassification
 } from '../types/index';
 import { VALID_CLASSIFICATIONS } from '../types';
 import { asyncHandler } from '../middleware/errorHandler';
 
-export function createLocationRoute(geminiClient: GoogleGenerativeAI | null) {
+const GEMINI_KEY_401_MSG = 'Missing Gemini API key. Set it in the extension (Command: PR Notes: Set Gemini API Key).';
+
+function getGeminiKey(req: Request): string | null {
+  const key = req.headers['x-gemini-api-key'];
+  if (typeof key !== 'string' || !key.trim()) return null;
+  return key.trim();
+}
+
+export function createLocationRoute() {
   return asyncHandler(async (
     req: Request<{}, LocationSelectionResponse, LocationSelectionRequest>,
     res: Response<LocationSelectionResponse | LocationSelectionErrorResponse>
   ) => {
     console.log(`[API] POST /select-comment-location - Request received`);
-    
-    if (!geminiClient) {
-      console.error('[API] ERROR: Gemini client not initialized');
-      return res.status(500).json({ 
+
+    const apiKey = getGeminiKey(req);
+    if (!apiKey) {
+      console.error('[API] ERROR: Missing X-Gemini-Api-Key header');
+      return res.status(401).json({
         selectedIndex: 0,
-        error: 'Gemini client not initialized. Check server logs for API key errors.' 
+        error: GEMINI_KEY_401_MSG,
       } as LocationSelectionErrorResponse);
     }
 
@@ -85,6 +94,7 @@ export function createLocationRoute(geminiClient: GoogleGenerativeAI | null) {
     console.log(`[API] ✓ All candidates validated successfully`);
 
     try {
+      const geminiClient = new GoogleGenerativeAI(apiKey);
       console.log(`[API] Calling selectCommentLocation function...`);
       const selection = await selectCommentLocation(
         commentText,
@@ -98,26 +108,27 @@ export function createLocationRoute(geminiClient: GoogleGenerativeAI | null) {
     } catch (error) {
       console.error('[API] ERROR: Location selection failed:', error);
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      res.status(500).json({ 
+      res.status(500).json({
         selectedIndex: 0,
-        error: `Location selection failed: ${errorMessage}` 
+        error: `Location selection failed: ${errorMessage}`,
       } as LocationSelectionErrorResponse);
     }
   });
 }
 
-export function createBatchLocationRoute(geminiClient: GoogleGenerativeAI | null) {
+export function createBatchLocationRoute() {
   return asyncHandler(async (
     req: Request<{}, BatchLocationSelectionResponse, BatchLocationSelectionRequest>,
     res: Response<BatchLocationSelectionResponse | BatchLocationSelectionErrorResponse>
   ) => {
     console.log(`[API] POST /select-comment-locations - Batch request received`);
-    
-    if (!geminiClient) {
-      console.error('[API] ERROR: Gemini client not initialized');
-      return res.status(500).json({ 
+
+    const apiKey = getGeminiKey(req);
+    if (!apiKey) {
+      console.error('[API] ERROR: Missing X-Gemini-Api-Key header');
+      return res.status(401).json({
         locations: [],
-        error: 'Gemini client not initialized. Check server logs for API key errors.' 
+        error: GEMINI_KEY_401_MSG,
       } as BatchLocationSelectionErrorResponse);
     }
 
@@ -194,6 +205,7 @@ export function createBatchLocationRoute(geminiClient: GoogleGenerativeAI | null
     console.log(`[API] ✓ All segments and candidates validated successfully`);
 
     try {
+      const geminiClient = new GoogleGenerativeAI(apiKey);
       console.log(`[API] Calling selectCommentLocationsBatch function...`);
       const locations = await selectCommentLocationsBatch(
         segments,
@@ -205,9 +217,9 @@ export function createBatchLocationRoute(geminiClient: GoogleGenerativeAI | null
     } catch (error) {
       console.error('[API] ERROR: Batch location selection failed:', error);
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      res.status(500).json({ 
+      res.status(500).json({
         locations: [],
-        error: `Batch location selection failed: ${errorMessage}` 
+        error: `Batch location selection failed: ${errorMessage}`,
       } as BatchLocationSelectionErrorResponse);
     }
   });

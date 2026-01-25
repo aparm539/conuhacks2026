@@ -256,6 +256,8 @@ export async function extractCodeContext(
 	return codeSnippets.join('\n\n') || '(No code context available)';
 }
 
+export const GEMINI_KEY_ERROR_MSG = 'Gemini API key missing or invalid. Set it via Command Palette: "PR Notes: Set Gemini API Key".';
+
 /**
  * Find the best location for a comment using Gemini API
  * Falls back to heuristic if Gemini fails
@@ -265,7 +267,8 @@ export async function findCommentLocation(
 	contexts: RecordingContext[],
 	document: vscode.TextDocument,
 	currentFile: string,
-	serverUrl: string = 'http://localhost:3000'
+	serverUrl: string = 'http://localhost:3000',
+	apiKey?: string
 ): Promise<vscode.Range> {
 	const lineCount = document.lineCount;
 
@@ -295,11 +298,11 @@ export async function findCommentLocation(
 
 	// Try to use Gemini API for location selection
 	try {
+		const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+		if (apiKey) {headers['X-Gemini-Api-Key'] = apiKey;}
 		const response = await fetch(`${serverUrl}/select-comment-location`, {
 			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-			},
+			headers,
 			body: JSON.stringify({
 				commentText: segment.transformedText,
 				classification: segment.classification,
@@ -308,6 +311,9 @@ export async function findCommentLocation(
 			}),
 		});
 
+		if (response.status === 401) {
+			throw new Error(GEMINI_KEY_ERROR_MSG);
+		}
 		if (response.ok) {
 			const data = await response.json() as { selectedIndex: number; rationale?: string };
 			
@@ -461,7 +467,8 @@ export async function findCommentLocationsBatch(
 	contexts: RecordingContext[],
 	document: vscode.TextDocument,
 	currentFile: string,
-	serverUrl: string = 'http://localhost:3000'
+	serverUrl: string = 'http://localhost:3000',
+	apiKey?: string
 ): Promise<vscode.Range[]> {
 	const lineCount = document.lineCount;
 
@@ -502,17 +509,20 @@ export async function findCommentLocationsBatch(
 
 	// Call batch API
 	try {
+		const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+		if (apiKey) {headers['X-Gemini-Api-Key'] = apiKey;}
 		const response = await fetch(`${serverUrl}/select-comment-locations`, {
 			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-			},
+			headers,
 			body: JSON.stringify({
 				segments: batchSegments,
 				candidates: allCandidates,
 			}),
 		});
 
+		if (response.status === 401) {
+			throw new Error(GEMINI_KEY_ERROR_MSG);
+		}
 		if (!response.ok) {
 			throw new Error(`HTTP error! status: ${response.status}`);
 		}
@@ -617,11 +627,14 @@ export async function findCommentLocationsBatch(
 
 		return ranges;
 	} catch (error) {
+		if (error instanceof Error && error.message === GEMINI_KEY_ERROR_MSG) {
+			throw error;
+		}
 		console.warn('Failed to use batch API for location selection, falling back to individual calls:', error);
 		// Fallback to individual calls
 		const ranges: vscode.Range[] = [];
 		for (const segment of segments) {
-			const range = await findCommentLocation(segment, contexts, document, currentFile, serverUrl);
+			const range = await findCommentLocation(segment, contexts, document, currentFile, serverUrl, apiKey);
 			ranges.push(range);
 		}
 		return ranges;
