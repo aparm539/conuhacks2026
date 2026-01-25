@@ -2,7 +2,6 @@
  * Audio service for recording and processing audio in VS Code extension
  */
 import * as vscode from 'vscode';
-import * as fs from 'fs';
 import * as path from 'path';
 import { DiarizationApiClient } from './apiClient';
 import { DiarizationResponse } from './types';
@@ -17,12 +16,15 @@ export class AudioService {
     }
 
     /**
-     * Get the temporary directory for storing audio files
+     * Get the temporary directory for storing audio files, creating it if needed
      */
-    private getTempDir(): string {
-        const tempDir = path.join(this.context.globalStoragePath, 'audio-temp');
-        if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir, { recursive: true });
+    private async ensureTempDir(): Promise<vscode.Uri> {
+        const tempDir = vscode.Uri.file(path.join(this.context.globalStoragePath, 'audio-temp'));
+        try {
+            await vscode.workspace.fs.stat(tempDir);
+        } catch {
+            // Directory doesn't exist, create it
+            await vscode.workspace.fs.createDirectory(tempDir);
         }
         return tempDir;
     }
@@ -39,8 +41,8 @@ export class AudioService {
         // 2. Or spawn a child process to use system audio recording tools
         // 3. Save the audio to a temporary file
         
-        const tempDir = this.getTempDir();
-        const audioPath = path.join(tempDir, `recording-${Date.now()}.wav`);
+        const tempDir = await this.ensureTempDir();
+        const audioPath = vscode.Uri.joinPath(tempDir, `recording-${Date.now()}.wav`).fsPath;
         
         // Placeholder: In real implementation, record audio here
         // For now, we'll show an error that recording needs to be implemented
@@ -55,13 +57,16 @@ export class AudioService {
      */
     async processAudioFile(audioFilePath: string): Promise<DiarizationResponse> {
         try {
-            // Check if file exists
-            if (!fs.existsSync(audioFilePath)) {
+            // Check if file exists and get its size
+            const fileUri = vscode.Uri.file(audioFilePath);
+            let stats: vscode.FileStat;
+            try {
+                stats = await vscode.workspace.fs.stat(fileUri);
+            } catch {
                 throw new Error(`Audio file not found: ${audioFilePath}`);
             }
 
             // Check file size (limit to 100MB)
-            const stats = fs.statSync(audioFilePath);
             const maxSize = 100 * 1024 * 1024; // 100MB
             if (stats.size > maxSize) {
                 throw new Error(`Audio file too large: ${(stats.size / 1024 / 1024).toFixed(2)}MB. Maximum size is 100MB.`);
@@ -153,21 +158,5 @@ export class AudioService {
      */
     formatResultsAsJson(results: DiarizationResponse): string {
         return JSON.stringify(results, null, 2);
-    }
-
-    /**
-     * Check if the API service is available
-     */
-    async checkServiceHealth(): Promise<boolean> {
-        try {
-            const health = await this.apiClient.checkHealth();
-            return health.pipeline_loaded;
-        } catch (error) {
-            vscode.window.showWarningMessage(
-                `Diarization service is not available: ${error instanceof Error ? error.message : 'Unknown error'}. ` +
-                `Make sure the Docker container is running on ${this.apiClient.getBaseUrl()}`
-            );
-            return false;
-        }
     }
 }

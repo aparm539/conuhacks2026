@@ -6,6 +6,9 @@ import * as vscode from 'vscode';
 const GITHUB_PROVIDER_ID = 'github';
 const SCOPES = ['read:user', 'repo'];
 
+// Shared GitHub API constant
+export const GITHUB_API = 'https://api.github.com';
+
 export interface AuthState {
 	loggedIn: boolean;
 	accountLabel?: string;

@@ -1,9 +1,7 @@
 import * as vscode from 'vscode';
+import type { AuthState } from './githubAuth';
 
-export interface AuthState {
-	loggedIn: boolean;
-	accountLabel?: string;
-}
+export type { AuthState };
 
 export interface StatusBarCallbacks {
 	onStartRecording: () => void;

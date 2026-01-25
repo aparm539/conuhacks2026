@@ -16,17 +16,8 @@
   "contributes": {
     "commands": [
       {
-        "command": "pr-notes.helloWorld",
-        "title": "Hello World"
-      },
-      {
         "command": "pr-notes.processAudio",
         "title": "Process Audio for Speaker Diarization",
-        "category": "PR Notes"
-      },
-      {
-        "command": "pr-notes.checkHealth",
-        "title": "Check Diarization Service Health",
         "category": "PR Notes"
       },
       {

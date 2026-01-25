@@ -120,16 +120,9 @@ Classifications:`;
     const response = await result.response;
     const text = response.text();
 
-    // Parse JSON response
     let classifications: string[];
     try {
-        // Extract JSON from response (might have markdown code blocks)
-        const jsonMatch = text.match(/\[.*?\]/s);
-        if (jsonMatch) {
-            classifications = JSON.parse(jsonMatch[0]);
-        } else {
-            classifications = JSON.parse(text);
-        }
+        classifications = parseJsonArray<string>(text, segments.length);
     } catch (error) {
         console.error('Failed to parse Gemini response:', text);
         throw new Error(`Failed to parse classification response: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -153,7 +146,7 @@ Classifications:`;
 /**
  * Classify segments in parallel batches with context
  */
-export async function classifySegmentsSequentially(
+export async function classifySegmentsInBatches(
     segments: SpeakerSegment[]
 ): Promise<ClassifiedSegment[]> {
     if (segments.length === 0) {
@@ -252,12 +245,7 @@ Transformed comments:`;
 
     let transformedTexts: string[];
     try {
-        const jsonMatch = text.match(/\[.*?\]/s);
-        if (jsonMatch) {
-            transformedTexts = JSON.parse(jsonMatch[0]);
-        } else {
-            transformedTexts = JSON.parse(text);
-        }
+        transformedTexts = parseJsonArray<string>(text, segments.length);
     } catch (error) {
         console.error('Failed to parse Gemini transformation response:', text);
         throw new Error(`Failed to parse transformation response: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -273,7 +261,7 @@ Transformed comments:`;
 /**
  * Transform classified segments in parallel batches
  */
-export async function transformSegmentsSequentially(
+export async function transformSegmentsInBatches(
     classifiedSegments: ClassifiedSegment[]
 ): Promise<TransformedSegment[]> {
     const segmentsToTransform = classifiedSegments.filter(seg => seg.classification !== 'Ignore');
@@ -412,7 +400,7 @@ Now return the JSON array:`;
 /**
  * Split segments in parallel batches
  */
-export async function splitSegmentsSequentially(
+export async function splitSegmentsInBatches(
     classifiedSegments: ClassifiedSegment[]
 ): Promise<ClassifiedSegment[]> {
     if (classifiedSegments.length === 0) {
@@ -552,12 +540,7 @@ Process the segments above:`;
 
     let results: CombinedResult[];
     try {
-        const jsonMatch = text.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-            results = JSON.parse(jsonMatch[0]);
-        } else {
-            results = JSON.parse(text);
-        }
+        results = parseJsonArray<CombinedResult>(text, segments.length);
     } catch (error) {
         console.error('[ProcessCombined] Failed to parse Gemini response:', text);
         throw new Error(`Failed to parse combined processing response: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -687,12 +670,7 @@ Selections:`;
 
     let selections: LocationSelection[];
     try {
-        const jsonMatch = text.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-            selections = JSON.parse(jsonMatch[0]);
-        } else {
-            selections = JSON.parse(text);
-        }
+        selections = parseJsonArray<LocationSelection>(text, segments.length);
     } catch (error) {
         console.error('[Location Selection Batch] Failed to parse Gemini response:', text);
         throw new Error(`Failed to parse batch location selection response: ${error instanceof Error ? error.message : 'Unknown error'}`);

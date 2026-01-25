@@ -38,12 +38,6 @@ export function activate(context: vscode.ExtensionContext) {
 	const apiClient = new DiarizationApiClient();
 	audioService = new AudioService(context, apiClient);
 
-	// Check service health on activation
-	audioService.checkServiceHealth().then(isHealthy => {
-		if (isHealthy) {
-			console.log('Diarization service is ready');
-		}
-	});
 
 	// Recording functionality setup
 	const serverPath = path.join(context.extensionPath, 'out', 'server.js');
@@ -582,15 +576,6 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	});
 
-	// Register command for checking service health (diarisation)
-	const checkHealthDisposable = vscode.commands.registerCommand('pr-notes.checkHealth', async () => {
-		const isHealthy = await audioService.checkServiceHealth();
-		if (isHealthy) {
-			vscode.window.showInformationMessage('Diarization service is healthy and ready!');
-		} else {
-			vscode.window.showWarningMessage('Diarization service is not available. Please check the Docker container.');
-		}
-	});
 
 	// Status bar menu command (recording)
 	const showMenuDisposable = vscode.commands.registerCommand('pr-notes.showMenu', async () => {
@@ -613,15 +598,6 @@ export function activate(context: vscode.ExtensionContext) {
 
 		await showStatusBarMenu(isRecording, deviceDisplayName, callbacks, authState);
 		await refreshStatusBar();
-	});
-
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with registerCommand
-	// The commandId parameter must match the command field in package.json
-	const helloWorldDisposable = vscode.commands.registerCommand('pr-notes.helloWorld', () => {
-		// The code you place here will be executed every time your command is executed
-		// Display a message box to the user
-		vscode.window.showInformationMessage('Hello World from pr-notes!');
 	});
 
 	const loginDisposable = vscode.commands.registerCommand('pr-notes.login', handleLogin);
@@ -673,9 +649,7 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(statusBarItem);
 	context.subscriptions.push(commentController);
 	context.subscriptions.push(processAudioDisposable);
-	context.subscriptions.push(checkHealthDisposable);
 	context.subscriptions.push(showMenuDisposable);
-	context.subscriptions.push(helloWorldDisposable);
 	context.subscriptions.push(loginDisposable);
 	context.subscriptions.push(downloadModelsDisposable);
 	context.subscriptions.push(setGeminiApiKeyDisposable);

@@ -15,29 +15,6 @@ export class DiarizationApiClient {
     }
 
     /**
-     * Check if the API service is healthy and ready
-     */
-    async checkHealth(): Promise<HealthResponse> {
-        try {
-            const response = await fetch(`${this.config.baseUrl}/health`, {
-                method: 'GET',
-                signal: AbortSignal.timeout(this.config.timeout || 5000),
-            });
-
-            if (!response.ok) {
-                throw new Error(`Health check failed: ${response.statusText}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            if (error instanceof Error) {
-                throw new Error(`Failed to connect to diarization service: ${error.message}`);
-            }
-            throw error;
-        }
-    }
-
-    /**
      * Process an audio file for speaker diarization
      * @param audioFile Path to the audio file or File/Blob object
      * @param onProgress Optional progress callback

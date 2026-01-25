@@ -1,9 +1,8 @@
 /**
  * Post PR review comments to GitHub via the REST API.
  */
-import type { PrContext } from './gitHubPrContext';
-
-const GITHUB_API = 'https://api.github.com';
+import type { PrContext } from './githubPrContext';
+import { GITHUB_API } from './githubAuth';
 
 export interface ReviewCommentInput {
 	path: string;
