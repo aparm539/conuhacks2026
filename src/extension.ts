@@ -11,6 +11,8 @@ import { getSession, getAuthState, onSessionChange, registerSessionChangeListene
 import { getSelectedDevice, selectAudioDevice, listAudioDevices } from './audioDeviceManager';
 import { ContextCollector, RecordingContext } from './contextCollector';
 import { WordInfo, SpeakerSegment, ClassifiedSegment, TransformedSegment, groupWordsBySpeaker, findCommentLocation, findCommentLocationsBatch } from './speechAlignment';
+import { getPrContext } from './gitHubPrContext';
+import { postReviewComments, type ReviewCommentInput } from './githubPrComments';
 
 const TRANSCRIPTION_SERVER_URL = 'http://localhost:3000';
 
@@ -112,7 +114,10 @@ export function activate(context: vscode.ExtensionContext) {
 			TRANSCRIPTION_SERVER_URL
 		);
 
-		// Create comments for all segments (display incrementally as they're created)
+		// Build GitHub review comment payload (path, 1-based line, body) and create VS Code threads
+		const reviewComments: ReviewCommentInput[] = [];
+		const filePath = currentFile ?? '';
+
 		for (let i = 0; i < segmentsToComment.length; i++) {
 			const segment = segmentsToComment[i];
 			const range = ranges[i];
@@ -129,10 +134,41 @@ export function activate(context: vscode.ExtensionContext) {
 
 			// Create comment thread at the determined location
 			commentController.createCommentThread(document.uri, range, [comment]);
+
+			// Accumulate for GitHub (1-based line)
+			const line = range.start.line >= 0 ? range.start.line + 1 : 1;
+			reviewComments.push({ path: filePath, line, body: commentText });
 		}
 
-		// Show completion message
-		vscode.window.showInformationMessage(`Created ${segmentsToComment.length} comment(s) in ${currentFile}`);
+		// Show completion message for local comments
+		const localMsg = `Created ${segmentsToComment.length} comment(s) in ${currentFile}`;
+
+		// Optionally post to GitHub
+		const postToGitHub = vscode.workspace.getConfiguration('pr-notes').get<boolean>('postToGitHub') ?? true;
+		if (!postToGitHub) {
+			vscode.window.showInformationMessage(localMsg);
+			return;
+		}
+
+		const session = await getSession(false);
+		if (!session) {
+			vscode.window.showInformationMessage(`${localMsg} Sign in and use a PR branch to post to GitHub.`);
+			return;
+		}
+
+		const prContext = await getPrContext(session.accessToken);
+		if (!prContext) {
+			vscode.window.showInformationMessage(`${localMsg} Sign in and use a PR branch to post to GitHub.`);
+			return;
+		}
+
+		const result = await postReviewComments(reviewComments, prContext, session.accessToken);
+		if (result.success) {
+			vscode.window.showInformationMessage(`Created ${segmentsToComment.length} comment(s) in ${currentFile} and on GitHub.`);
+		} else {
+			vscode.window.showInformationMessage(localMsg);
+			vscode.window.showErrorMessage(`Could not post to GitHub: ${result.error ?? 'Unknown error'}`);
+		}
 	}
 
 	async function transcribeAudio(audioData: Buffer, audioFilePath: string): Promise<WordInfo[]> {
