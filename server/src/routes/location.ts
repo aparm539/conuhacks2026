@@ -19,11 +19,8 @@ export function createLocationRoute(geminiClient: GoogleGenerativeAI | null) {
     req: Request<{}, LocationSelectionResponse, LocationSelectionRequest>,
     res: Response<LocationSelectionResponse | LocationSelectionErrorResponse>
   ) => {
-    console.log(`[API] POST /select-comment-location - Request received`);
-    
     const client = requireGeminiClient(geminiClient);
     const { commentText, classification, candidates, fileName } = req.body;
-    console.log(`[API] Request body: commentText="${commentText?.substring(0, 50)}${commentText?.length > 50 ? '...' : ''}", classification=${classification}, fileName=${fileName}, candidates=${candidates?.length || 0}`);
 
     if (!commentText || typeof commentText !== 'string') {
       console.error('[API] ERROR: Missing or invalid commentText');
@@ -51,18 +48,16 @@ export function createLocationRoute(geminiClient: GoogleGenerativeAI | null) {
     }
 
     // Validate candidate structure
-    console.log(`[API] Validating ${validatedCandidates.length} candidate(s)...`);
     try {
       validateCandidateLocations(validatedCandidates);
     } catch (error) {
+      console.error('[API] ERROR: Invalid candidate structure', error);
       return res.status(400).json({ 
         selectedIndex: 0,
         error: error instanceof Error ? error.message : 'Invalid candidate structure' 
       } as LocationSelectionErrorResponse);
     }
-    console.log(`[API] ✓ All candidates validated successfully`);
 
-    console.log(`[API] Calling selectCommentLocation function...`);
     const selection = await selectCommentLocation(
       commentText,
       classification as SegmentClassification,
@@ -70,7 +65,6 @@ export function createLocationRoute(geminiClient: GoogleGenerativeAI | null) {
       fileName || '',
       client
     );
-    console.log(`[API] ✓ Location selection completed: index=${selection.selectedIndex}`);
     res.json(selection);
   });
 }
@@ -80,11 +74,8 @@ export function createBatchLocationRoute(geminiClient: GoogleGenerativeAI | null
     req: Request<{}, BatchLocationSelectionResponse, BatchLocationSelectionRequest>,
     res: Response<BatchLocationSelectionResponse | BatchLocationSelectionErrorResponse>
   ) => {
-    console.log(`[API] POST /select-comment-locations - Batch request received`);
-    
     const client = requireGeminiClient(geminiClient);
     const { segments, candidates } = req.body;
-    console.log(`[API] Request body: ${segments?.length || 0} segment(s), ${candidates?.length || 0} candidate array(s)`);
 
     const validatedSegments = validateArray<unknown>(segments, 'segments');
     if (validatedSegments.length === 0) {
@@ -105,7 +96,6 @@ export function createBatchLocationRoute(geminiClient: GoogleGenerativeAI | null
     }
 
     // Validate segment structure
-    console.log(`[API] Validating ${validatedSegments.length} segment(s)...`);
     for (let i = 0; i < validatedSegments.length; i++) {
       const segment = validatedSegments[i] as any;
       if (
@@ -124,7 +114,6 @@ export function createBatchLocationRoute(geminiClient: GoogleGenerativeAI | null
     }
 
     // Validate candidate arrays
-    console.log(`[API] Validating ${validatedCandidates.length} candidate array(s)...`);
     for (let i = 0; i < validatedCandidates.length; i++) {
       const candidateArray = validatedCandidates[i];
       if (!Array.isArray(candidateArray) || candidateArray.length === 0) {
@@ -139,22 +128,19 @@ export function createBatchLocationRoute(geminiClient: GoogleGenerativeAI | null
       try {
         validateCandidateLocations(candidateArray as unknown[]);
       } catch (error) {
-        console.error(`[API] ERROR: Invalid candidate structure at segment ${i}`);
+        console.error(`[API] ERROR: Invalid candidate structure at segment ${i}`, error);
         return res.status(400).json({ 
           locations: [],
           error: error instanceof Error ? error.message : `Invalid candidate structure at segment ${i}` 
         } as BatchLocationSelectionErrorResponse);
       }
     }
-    console.log(`[API] ✓ All segments and candidates validated successfully`);
 
-    console.log(`[API] Calling selectCommentLocationsBatch function...`);
     const locations = await selectCommentLocationsBatch(
       validatedSegments as any,
       validatedCandidates as any,
       client
     );
-    console.log(`[API] ✓ Batch location selection completed: ${locations.length} location(s)`);
     res.json({ locations });
   });
 }

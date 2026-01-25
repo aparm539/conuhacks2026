@@ -2,6 +2,24 @@
  * TypeScript type definitions for the Speaker Diarization API
  */
 
+// Shared segment types (also defined in server/src/types/index.ts - keep in sync)
+export type SegmentClassification = 'Ignore' | 'Question' | 'Concern' | 'Suggestion' | 'Style';
+
+export interface SpeakerSegment {
+    speakerTag: number;
+    text: string;
+    startTime: number;
+    endTime: number;
+}
+
+export interface ClassifiedSegment extends SpeakerSegment {
+    classification: SegmentClassification;
+}
+
+export interface TransformedSegment extends ClassifiedSegment {
+    transformedText: string;
+}
+
 // Note: SpeakerSegment for diarization service uses different field names
 // This matches DiarizationSpeakerSegment from server types
 export interface DiarizationSpeakerSegment {

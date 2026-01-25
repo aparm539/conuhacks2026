@@ -3,8 +3,10 @@
  */
 import * as vscode from 'vscode';
 import { DiarizationResponse, ErrorResponse, HealthResponse, ApiConfig } from './types';
+import { HttpClient } from './services/httpClient';
 
 export class DiarizationApiClient {
+    private httpClient: HttpClient;
     private config: ApiConfig;
 
     constructor(config?: Partial<ApiConfig>) {
@@ -12,29 +14,17 @@ export class DiarizationApiClient {
             baseUrl: config?.baseUrl || 'http://localhost:8000',
             timeout: config?.timeout || 300000, // 5 minutes default
         };
+        this.httpClient = new HttpClient(this.config.baseUrl, this.config.timeout);
     }
 
     /**
      * Check if the API service is healthy and ready
      */
     async checkHealth(): Promise<HealthResponse> {
-        try {
-            const response = await fetch(`${this.config.baseUrl}/health`, {
-                method: 'GET',
-                signal: AbortSignal.timeout(this.config.timeout || 5000),
-            });
-
-            if (!response.ok) {
-                throw new Error(`Health check failed: ${response.statusText}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            if (error instanceof Error) {
-                throw new Error(`Failed to connect to diarization service: ${error.message}`);
-            }
-            throw error;
-        }
+        return this.httpClient.get<HealthResponse>('/health', {
+            timeout: 5000,
+            errorContext: 'Health check'
+        });
     }
 
     /**
@@ -46,66 +36,32 @@ export class DiarizationApiClient {
         audioFile: string | File | Blob,
         onProgress?: (progress: number) => void
     ): Promise<DiarizationResponse> {
-        try {
-            // Prepare form data
-            const formData = new FormData();
-            
-            if (typeof audioFile === 'string') {
-                // If it's a file path, we need to read it as a file
-                // In VS Code extension context, we'll need to use vscode.workspace.fs
-                const fileData = await vscode.workspace.fs.readFile(vscode.Uri.file(audioFile));
-                const fileName = audioFile.split(/[/\\]/).pop() || 'audio.wav';
-                // Convert Uint8Array to ArrayBuffer for Blob constructor
-                const arrayBuffer = fileData.buffer.slice(fileData.byteOffset, fileData.byteOffset + fileData.byteLength) as ArrayBuffer;
-                const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
-                formData.append('audio', blob, fileName);
-            } else {
-                // It's already a File or Blob
-                formData.append('audio', audioFile, 'audio.wav');
-            }
-
-            // Create abort controller for timeout
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), this.config.timeout);
-
-            try {
-                const response = await fetch(`${this.config.baseUrl}/process`, {
-                    method: 'POST',
-                    body: formData,
-                    signal: controller.signal,
-                });
-
-                clearTimeout(timeoutId);
-
-                if (!response.ok) {
-                    const errorData: ErrorResponse = await response.json().catch(() => ({
-                        success: false,
-                        error: 'Unknown error',
-                        message: response.statusText,
-                    }));
-                    throw new Error(errorData.message || errorData.error || `HTTP ${response.status}`);
-                }
-
-                const result: DiarizationResponse = await response.json();
-                
-                if (!result.success) {
-                    throw new Error(result.message || 'Processing failed');
-                }
-
-                return result;
-            } catch (error) {
-                clearTimeout(timeoutId);
-                if (error instanceof Error && error.name === 'AbortError') {
-                    throw new Error('Request timeout: Audio processing took too long');
-                }
-                throw error;
-            }
-        } catch (error) {
-            if (error instanceof Error) {
-                throw new Error(`Failed to process audio: ${error.message}`);
-            }
-            throw error;
+        // Prepare form data
+        const formData = new FormData();
+        
+        if (typeof audioFile === 'string') {
+            // If it's a file path, we need to read it as a file
+            // In VS Code extension context, we'll need to use vscode.workspace.fs
+            const fileData = await vscode.workspace.fs.readFile(vscode.Uri.file(audioFile));
+            const fileName = audioFile.split(/[/\\]/).pop() || 'audio.wav';
+            // Convert Uint8Array to ArrayBuffer for Blob constructor
+            const arrayBuffer = fileData.buffer.slice(fileData.byteOffset, fileData.byteOffset + fileData.byteLength) as ArrayBuffer;
+            const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
+            formData.append('audio', blob, fileName);
+        } else {
+            // It's already a File or Blob
+            formData.append('audio', audioFile, 'audio.wav');
         }
+
+        const result = await this.httpClient.postFormData<DiarizationResponse>('/process', formData, {
+            errorContext: 'Audio processing'
+        });
+        
+        if (!result.success) {
+            throw new Error(result.message || 'Processing failed');
+        }
+
+        return result;
     }
 
     /**
@@ -124,7 +80,7 @@ export class DiarizationApiClient {
      * Get the base URL of the API
      */
     getBaseUrl(): string {
-        return this.config.baseUrl;
+        return this.httpClient.getBaseUrl();
     }
 
     /**
@@ -132,5 +88,6 @@ export class DiarizationApiClient {
      */
     updateConfig(config: Partial<ApiConfig>): void {
         this.config = { ...this.config, ...config };
+        this.httpClient = new HttpClient(this.config.baseUrl, this.config.timeout);
     }
 }

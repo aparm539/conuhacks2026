@@ -17,6 +17,47 @@ import { parseJsonArray, parseJsonResponse } from '../utils/jsonParser';
 import { VALID_CLASSIFICATIONS } from '../types';
 
 /**
+ * Configuration for generic batch processing
+ */
+interface BatchProcessorConfig<TInput, TOutput> {
+  promptBuilder: (segments: TInput[], contextBefore: TInput[], contextAfter: TInput[], segmentStartIndex: number, segmentEndIndex: number) => string;
+  responseParser: (text: string) => TOutput[];
+  validator: (results: TOutput[], expectedCount: number) => void;
+}
+
+/**
+ * Generic batch processor for Gemini API calls
+ * Handles common patterns: combining context, calling API, parsing, and validation
+ */
+async function processBatch<TInput, TOutput>(
+  segments: TInput[],
+  contextBefore: TInput[],
+  contextAfter: TInput[],
+  geminiClient: GoogleGenerativeAI,
+  config: BatchProcessorConfig<TInput, TOutput>
+): Promise<TOutput[]> {
+  const segmentStartIndex = contextBefore.length;
+  const segmentEndIndex = segmentStartIndex + segments.length;
+
+  // Build prompt using provided builder
+  const prompt = config.promptBuilder(segments, contextBefore, contextAfter, segmentStartIndex, segmentEndIndex);
+
+  // Call Gemini API
+  const model = geminiClient.getGenerativeModel({ model: GEMINI_MODEL });
+  const result = await model.generateContent(prompt);
+  const response = await result.response;
+  const text = response.text();
+
+  // Parse response using provided parser
+  const results = config.responseParser(text);
+
+  // Validate using provided validator
+  config.validator(results, segments.length);
+
+  return results;
+}
+
+/**
  * Classify a batch of segments with surrounding context
  */
 export async function classifySegmentsBatch(
@@ -25,17 +66,15 @@ export async function classifySegmentsBatch(
   contextAfter: SpeakerSegment[],
   geminiClient: GoogleGenerativeAI
 ): Promise<SegmentClassification[]> {
-  // Combine context and segments
   const allSegments = [...contextBefore, ...segments, ...contextAfter];
-  const segmentStartIndex = contextBefore.length;
-  const segmentEndIndex = segmentStartIndex + segments.length;
+  
+  return processBatch(segments, contextBefore, contextAfter, geminiClient, {
+    promptBuilder: (segments, contextBefore, contextAfter, segmentStartIndex, segmentEndIndex) => {
+      const segmentsText = allSegments
+        .map((seg, idx) => `[${idx}] Speaker ${seg.speakerTag}: "${seg.text}"`)
+        .join('\n');
 
-  // Build prompt
-  const segmentsText = allSegments
-    .map((seg, idx) => `[${idx}] Speaker ${seg.speakerTag}: "${seg.text}"`)
-    .join('\n');
-
-  const prompt = `You are classifying spoken segments from a code review discussion. Each segment should be classified into exactly one of these categories:
+      return `You are classifying spoken segments from a code review discussion. Each segment should be classified into exactly one of these categories:
 
 - Ignore: Off-topic, filler words, or not relevant to code review
 - Question: Asking about how something works or why it was done
@@ -51,28 +90,19 @@ Return a JSON array with classifications for indices ${segmentStartIndex} to ${s
 Example format: ["Question", "Concern", "Suggestion"]
 
 Classifications:`;
-
-  const model = geminiClient.getGenerativeModel({ model: GEMINI_MODEL });
-  const result = await model.generateContent(prompt);
-  const response = await result.response;
-  const text = response.text();
-
-  // Parse JSON response
-  const classifications = parseJsonResponse<string[]>(text);
-
-  // Validate classifications
-  if (!Array.isArray(classifications) || classifications.length !== segments.length) {
-    throw new Error(`Expected ${segments.length} classifications, got ${classifications.length}`);
-  }
-
-  // Validate each classification
-  for (let i = 0; i < classifications.length; i++) {
-    if (!VALID_CLASSIFICATIONS.includes(classifications[i] as SegmentClassification)) {
-      throw new Error(`Invalid classification at index ${i}: ${classifications[i]}`);
+    },
+    responseParser: (text: string) => parseJsonResponse<string[]>(text),
+    validator: (classifications, expectedCount) => {
+      if (!Array.isArray(classifications) || classifications.length !== expectedCount) {
+        throw new Error(`Expected ${expectedCount} classifications, got ${classifications.length}`);
+      }
+      for (let i = 0; i < classifications.length; i++) {
+        if (!VALID_CLASSIFICATIONS.includes(classifications[i] as SegmentClassification)) {
+          throw new Error(`Invalid classification at index ${i}: ${classifications[i]}`);
+        }
+      }
     }
-  }
-
-  return classifications as SegmentClassification[];
+  }) as Promise<SegmentClassification[]>;
 }
 
 /**
@@ -120,29 +150,27 @@ export async function transformSegmentsBatch(
   contextAfter: ClassifiedSegment[],
   geminiClient: GoogleGenerativeAI
 ): Promise<string[]> {
-  // Combine context and segments
   const allSegments = [...contextBefore, ...segments, ...contextAfter];
-  const segmentStartIndex = contextBefore.length;
-  const segmentEndIndex = segmentStartIndex + segments.length;
-
-  // Build prompt with segments and their classifications
-  const segmentsText = segments
-    .map((seg, idx) => {
-      const globalIdx = segmentStartIndex + idx;
-      return `[${globalIdx}] [${seg.classification}] "${seg.text}"`;
-    })
-    .join('\n');
-
-  const contextText = allSegments.length > segments.length
-    ? `\n\nContext (for reference only):\n${allSegments
+  
+  return processBatch(segments, contextBefore, contextAfter, geminiClient, {
+    promptBuilder: (segments, contextBefore, contextAfter, segmentStartIndex, segmentEndIndex) => {
+      const segmentsText = segments
         .map((seg, idx) => {
-          const classification = 'classification' in seg ? `[${seg.classification}]` : '';
-          return `[${idx}] ${classification} "${seg.text}"`;
+          const globalIdx = segmentStartIndex + idx;
+          return `[${globalIdx}] [${seg.classification}] "${seg.text}"`;
         })
-        .join('\n')}`
-    : '';
+        .join('\n');
 
-  const prompt = `You are transforming raw spoken code review comments into polished, professional review comments.
+      const contextText = allSegments.length > segments.length
+        ? `\n\nContext (for reference only):\n${allSegments
+            .map((seg, idx) => {
+              const classification = 'classification' in seg ? `[${seg.classification}]` : '';
+              return `[${idx}] ${classification} "${seg.text}"`;
+            })
+            .join('\n')}`
+        : '';
+
+      return `You are transforming raw spoken code review comments into polished, professional review comments.
 
 For each segment below, transform the raw speech text into a polished, professional code review comment. Your transformations should:
 
@@ -162,28 +190,19 @@ Input: ["um like this function could maybe be better", "I think we should add er
 Output: ["This function could be improved", "Consider adding error handling here"]
 
 Transformed comments:`;
-
-  const model = geminiClient.getGenerativeModel({ model: GEMINI_MODEL });
-  const result = await model.generateContent(prompt);
-  const response = await result.response;
-  const text = response.text();
-
-  // Parse JSON response
-  const transformedTexts = parseJsonResponse<string[]>(text);
-
-  // Validate response
-  if (!Array.isArray(transformedTexts) || transformedTexts.length !== segments.length) {
-    throw new Error(`Expected ${segments.length} transformed texts, got ${transformedTexts.length}`);
-  }
-
-  // Validate each transformed text is a string
-  for (let i = 0; i < transformedTexts.length; i++) {
-    if (typeof transformedTexts[i] !== 'string') {
-      throw new Error(`Invalid transformed text at index ${i}: expected string, got ${typeof transformedTexts[i]}`);
+    },
+    responseParser: (text: string) => parseJsonResponse<string[]>(text),
+    validator: (transformedTexts, expectedCount) => {
+      if (!Array.isArray(transformedTexts) || transformedTexts.length !== expectedCount) {
+        throw new Error(`Expected ${expectedCount} transformed texts, got ${transformedTexts.length}`);
+      }
+      for (let i = 0; i < transformedTexts.length; i++) {
+        if (typeof transformedTexts[i] !== 'string') {
+          throw new Error(`Invalid transformed text at index ${i}: expected string, got ${typeof transformedTexts[i]}`);
+        }
+      }
     }
-  }
-
-  return transformedTexts;
+  }) as Promise<string[]>;
 }
 
 /**

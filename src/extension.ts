@@ -1,51 +1,18 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
-import * as path from 'path';
 
-import {spawn, ChildProcess} from 'child_process';
 import { AudioService } from './audioService';
 import { DiarizationApiClient } from './apiClient';
 import { createStatusBarItem, updateStatusBar, showStatusBarMenu, StatusBarCallbacks } from './statusBar';
 import { getSelectedDevice, selectAudioDevice } from './audioDeviceManager';
-import { ContextCollector, RecordingContext } from './contextCollector';
-import { WordInfo, SpeakerSegment, ClassifiedSegment, TransformedSegment, groupWordsBySpeaker, findCommentLocation, findCommentLocationsBatch } from './speechAlignment';
-import { getDeviceDisplayName, getFileRelativePath } from './utils/vscode';
-
-const TRANSCRIPTION_SERVER_URL = 'http://localhost:3000';
+import { getDeviceDisplayName } from './utils/vscode';
+import { ServerManager } from './services/serverManager';
+import { RecordingService } from './services/recordingService';
+import { handleAudioMessage } from './handlers/audioMessageHandler';
+import { RECORDING_START_DELAY_MS } from './config/constants';
 
 let audioService: AudioService;
-
-/**
- * Generic API call helper to consolidate fetch patterns
- */
-async function callApi<TRequest, TResponse>(
-	endpoint: string,
-	body: TRequest,
-	errorContext: string
-): Promise<TResponse> {
-	try {
-		const response = await fetch(`${TRANSCRIPTION_SERVER_URL}${endpoint}`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify(body),
-		});
-
-		if (!response.ok) {
-			const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
-			throw new Error(errorData.error || `${errorContext} failed: HTTP ${response.status}`);
-		}
-
-		return response.json() as Promise<TResponse>;
-	} catch (error) {
-		if (error instanceof TypeError && error.message.includes('fetch')) {
-			throw new Error('Failed to connect to transcription server. Make sure the Docker container is running on port 3000.');
-		}
-		throw error;
-	}
-}
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -67,12 +34,8 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 
 	// Recording functionality setup
-	const serverPath = path.join(context.extensionPath, 'out', 'server.js');
-
-	let serverProcess: ChildProcess | null = null;
-	let isRecording = false;
-	const contextCollector = new ContextCollector();
-	let pendingContext: RecordingContext[] | null = null;
+	const serverManager = new ServerManager(context.extensionPath);
+	const recordingService = new RecordingService(serverManager);
 
 	const commentController = vscode.comments.createCommentController('pr-notes-comments', 'PR Notes');
 
@@ -83,369 +46,51 @@ export function activate(context: vscode.ExtensionContext) {
 	async function refreshStatusBar() {
 		const selectedDeviceId = getSelectedDevice();
 		const deviceDisplayName = await getDeviceDisplayName(selectedDeviceId);
-		updateStatusBar(statusBarItem, isRecording, deviceDisplayName);
+		updateStatusBar(statusBarItem, recordingService.getIsRecording(), deviceDisplayName);
 	}
 
 	// Initial status bar update
 	refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 
-	async function createComments(transformedSegments: TransformedSegment[], contexts: RecordingContext[]): Promise<void> {
-		const editor = vscode.window.activeTextEditor;
-		if (!editor) {
-			vscode.window.showWarningMessage('No active editor found. Please open a file to add comments.');
-			return;
-		}
-
-		const document = editor.document;
-		
-		// Get current file path for context matching
-		const currentFile = getFileRelativePath(document);
-
-		// Filter out Ignore segments (safety check - server already filters them)
-		const segmentsToComment = transformedSegments.filter(seg => seg.classification !== 'Ignore');
-		
-		console.log(`[EXTENSION] Filtered ${transformedSegments.length} transformed segments, ${segmentsToComment.length} non-Ignore segments remain`);
-
-		if (segmentsToComment.length === 0) {
-			const ignoreCount = transformedSegments.filter(seg => seg.classification === 'Ignore').length;
-			vscode.window.showWarningMessage(
-				`No speech segments found to create comments. ${transformedSegments.length} segments were processed, but ${ignoreCount} were classified as 'Ignore' and filtered out.`
-			);
-			return;
-		}
-
-		// Find all comment locations in parallel using batch API
-		const ranges = await findCommentLocationsBatch(
-			segmentsToComment,
-			contexts,
-			document,
-			currentFile || '',
-			TRANSCRIPTION_SERVER_URL
-		);
-
-		// Create comments for all segments (display incrementally as they're created)
-		for (let i = 0; i < segmentsToComment.length; i++) {
-			const segment = segmentsToComment[i];
-			const range = ranges[i];
-
-			// Format comment text with speaker label using transformed text
-			const commentText = `**Speaker ${segment.speakerTag}:** ${segment.transformedText}`;
-
-			// Create comment
-			const comment: vscode.Comment = {
-				body: new vscode.MarkdownString(commentText),
-				mode: vscode.CommentMode.Preview,
-				author: { name: 'PR Notes' }
-			};
-
-			// Create comment thread at the determined location
-			commentController.createCommentThread(document.uri, range, [comment]);
-		}
-
-		// Show completion message
-		vscode.window.showInformationMessage(`Created ${segmentsToComment.length} comment(s) in ${currentFile}`);
-	}
-
-	async function transcribeAudio(audioData: Buffer, audioFilePath: string): Promise<WordInfo[]> {
-		const audioBase64 = audioData.toString('base64');
-		const data = await callApi<{ audio: string }, { words?: WordInfo[] }>(
-			'/transcribe',
-			{ audio: audioBase64 },
-			'Transcription'
-		);
-		
-		if (!data.words || !Array.isArray(data.words)) {
-			throw new Error('No words array in response');
-		}
-
-		return data.words;
-	}
-
-	async function classifySegments(segments: SpeakerSegment[]): Promise<ClassifiedSegment[]> {
-		const data = await callApi<{ segments: SpeakerSegment[] }, { classifiedSegments?: ClassifiedSegment[] }>(
-			'/classify',
-			{ segments },
-			'Classification'
-		);
-		
-		if (!data.classifiedSegments || !Array.isArray(data.classifiedSegments)) {
-			throw new Error('No classifiedSegments array in response');
-		}
-
-		return data.classifiedSegments;
-	}
-
-	async function transformSegments(classifiedSegments: ClassifiedSegment[]): Promise<TransformedSegment[]> {
-		const data = await callApi<{ classifiedSegments: ClassifiedSegment[] }, { transformedSegments?: TransformedSegment[] }>(
-			'/transform',
-			{ classifiedSegments },
-			'Transformation'
-		);
-		
-		if (!data.transformedSegments || !Array.isArray(data.transformedSegments)) {
-			throw new Error('No transformedSegments array in response');
-		}
-
-		return data.transformedSegments;
-	}
-
-	async function splitSegments(classifiedSegments: ClassifiedSegment[]): Promise<ClassifiedSegment[]> {
-		const data = await callApi<{ classifiedSegments: ClassifiedSegment[] }, { splitSegments?: ClassifiedSegment[] }>(
-			'/split',
-			{ classifiedSegments },
-			'Splitting'
-		);
-		
-		if (!data.splitSegments || !Array.isArray(data.splitSegments)) {
-			throw new Error('No splitSegments array in response');
-		}
-
-		return data.splitSegments;
-	}
-
-	function startServer() {
-		if (serverProcess) {
-			return;
-		}
-
-		serverProcess = spawn('node', [serverPath], {
-			stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-			cwd: process.cwd()
-		});
-
-		// Handle child process events
-		serverProcess.on('close', (code, signal) => {
-			console.log(`Server process exited with code ${code}, Signal: ${signal}`);
-			serverProcess = null;
-			isRecording = false;
-			// Clean up context collector if recording was interrupted
-			if (pendingContext === null) {
-				contextCollector.clear();
-			}
-			pendingContext = null;
+	// Setup server manager callbacks
+	serverManager.start({
+		onClose: () => {
+			recordingService.setIsRecording(false);
+			recordingService.clearContext();
 			refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
-		});
-
-		async function saveRecordingFiles(
-			audioData: Buffer,
-			fileName: string,
-			contexts: RecordingContext[] | null,
-			recordingsUri: vscode.Uri
-		): Promise<Promise<void>[]> {
-			const fileUri = vscode.Uri.joinPath(recordingsUri, fileName);
-			const fileWritePromises: Promise<void>[] = [
-				new Promise<void>((resolve, reject) => {
-					vscode.workspace.fs.writeFile(fileUri, audioData).then(() => {
-						vscode.window.showInformationMessage(`Recording saved: ${fileName}`);
-						resolve();
-					}, reject);
-				})
-			];
-
-			if (contexts && contexts.length > 0) {
-				const contextFileName = fileName.replace('.wav', '.context.json');
-				const contextUri = vscode.Uri.joinPath(recordingsUri, contextFileName);
-				const contextJson = JSON.stringify(contexts, null, 2);
-				const contextBuffer = Buffer.from(contextJson, 'utf8');
-				fileWritePromises.push(
-					new Promise<void>((resolve, reject) => {
-						vscode.workspace.fs.writeFile(contextUri, contextBuffer).then(() => {
-							console.log(`Context saved: ${contextFileName}`);
-							resolve();
-						}, reject);
-					})
-				);
-			}
-
-			return fileWritePromises;
-		}
-
-		async function formatAndSaveTranscript(
-			words: WordInfo[],
-			fileName: string,
-			recordingsUri: vscode.Uri,
-			fileWritePromises: Promise<void>[]
-		): Promise<void> {
-			// Format transcript for saving (with speaker labels)
-			let formattedTranscript = '';
-			let currentSpeaker = -1;
-			for (const wordInfo of words) {
-				if (currentSpeaker !== wordInfo.speakerTag) {
-					if (formattedTranscript) {
-						formattedTranscript += '\n\n';
-					}
-					formattedTranscript += `**Speaker ${wordInfo.speakerTag}:** `;
-					currentSpeaker = wordInfo.speakerTag;
-				}
-				formattedTranscript += wordInfo.word + ' ';
-			}
-			
-			// Save transcript as .txt file
-			const transcriptFileName = fileName.replace('.wav', '.txt');
-			const transcriptUri = vscode.Uri.joinPath(recordingsUri, transcriptFileName);
-			const transcriptBuffer = Buffer.from(formattedTranscript.trim(), 'utf8');
-			fileWritePromises.push(
-				new Promise<void>((resolve, reject) => {
-					vscode.workspace.fs.writeFile(transcriptUri, transcriptBuffer).then(() => {
-						vscode.window.showInformationMessage(`Transcript saved: ${transcriptFileName}`);
-						resolve();
-					}, reject);
-				})
-			);
-		}
-
-		async function processAudioPipeline(
-			words: WordInfo[],
-			contexts: RecordingContext[]
-		): Promise<TransformedSegment[]> {
-			return await vscode.window.withProgress({
-				location: vscode.ProgressLocation.Notification,
-				title: "Processing Audio",
-				cancellable: false
-			}, async (progress) => {
-				// Group words by speaker segments
-				progress.report({ increment: 0, message: "Grouping words into segments..." });
-				const segments = groupWordsBySpeaker(words);
-				console.log(`[EXTENSION] Grouped ${words.length} words into ${segments.length} segments`);
-				
-				if (segments.length === 0) {
-					vscode.window.showWarningMessage('No speech segments found after grouping words. This might indicate an issue with the transcription.');
-					throw new Error('No segments found');
-				}
-				
-				// Classify segments
-				progress.report({ increment: 20, message: `Classifying ${segments.length} segments...` });
-				const classifiedSegments = await classifySegments(segments);
-				console.log(`[EXTENSION] Classified ${segments.length} segments into ${classifiedSegments.length} classified segments`);
-				
-				// Split segments based on topic and context
-				progress.report({ increment: 20, message: `Splitting ${classifiedSegments.length} segments...` });
-				const splitClassifiedSegments = await splitSegments(classifiedSegments);
-				console.log(`[EXTENSION] Split ${classifiedSegments.length} segments into ${splitClassifiedSegments.length} split segments`);
-				
-				// Transform segments
-				progress.report({ increment: 20, message: `Transforming ${splitClassifiedSegments.length} segments...` });
-				const transformedSegments = await transformSegments(splitClassifiedSegments);
-				console.log(`[EXTENSION] Transformed ${splitClassifiedSegments.length} segments into ${transformedSegments.length} transformed segments`);
-				
-				// Log classification breakdown
-				const classificationCounts = transformedSegments.reduce((acc, seg) => {
-					acc[seg.classification] = (acc[seg.classification] || 0) + 1;
-					return acc;
-				}, {} as Record<string, number>);
-				console.log(`[EXTENSION] Classification breakdown:`, classificationCounts);
-				
-				progress.report({ increment: 20, message: "Complete!" });
-				return transformedSegments;
-			});
-		}
-
-		serverProcess.on('message', async (message: { type: string; data: string }) => {
+		},
+		onError: () => {
+			recordingService.setIsRecording(false);
+			recordingService.clearContext();
+			refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+		},
+		onMessage: async (message: { type: string; data: string }) => {
 			console.log("We have a message");
 			if (message.type === 'audio') {
 				const audioData = Buffer.from(message.data, 'base64');
+				const contextsToUse = recordingService.getPendingContext();
 				
-				const storageUri = context.globalStorageUri;
-				const recordingsUri = vscode.Uri.joinPath(storageUri, 'recordings');
-				
-				// Create directory 
-				await vscode.workspace.fs.createDirectory(recordingsUri);
-
-				console.log(recordingsUri); 
-				
-				// Prepare file names and data
-				const fileName = `${Date.now()}.wav`;
-				const contextsToUse = pendingContext; // Store before clearing
-				pendingContext = null;
-
-				// Prepare file writes (don't await yet - start transcription immediately)
-				const fileWritePromises = await saveRecordingFiles(audioData, fileName, contextsToUse, recordingsUri);
-				
-				// Start file writes in parallel (don't await yet - start transcription immediately)
-				Promise.all(fileWritePromises).catch(err => {
-					console.error('Error saving files:', err);
-				});
-				
-				// Transcribe the audio (start immediately, don't wait for file writes)
-				try {
-					const words = await transcribeAudio(audioData, fileName);
-					
-					// Format and save transcript
-					await formatAndSaveTranscript(words, fileName, recordingsUri, fileWritePromises);
-
-					// Wait for all file writes to complete (including transcript)
-					await Promise.all(fileWritePromises);
-					
-					// Process audio pipeline
-					const transformedSegments = await processAudioPipeline(words, contextsToUse || []);
-					
-					// Create comments aligned to code using context snapshots with transformed text
-					const segmentsToComment = transformedSegments.filter(seg => seg.classification !== 'Ignore');
-					await vscode.window.withProgress({
-						location: vscode.ProgressLocation.Notification,
-						title: "Finding Comment Locations",
-						cancellable: false
-					}, async (progress) => {
-						progress.report({ increment: 0, message: `Finding locations for ${segmentsToComment.length} comments...` });
-						await createComments(transformedSegments, contextsToUse || []);
-					});
-				} catch (error) {
-					console.error('Transcription failed:', error);
-					const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-					vscode.window.showErrorMessage(`Failed to process audio: ${errorMessage}`);
-				}
-				
-				isRecording = false;
-				refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+				await handleAudioMessage(
+					audioData,
+					contextsToUse,
+					context.globalStorageUri,
+					{ commentController },
+					() => {
+						recordingService.setIsRecording(false);
+						refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+					}
+				);
 			}
-		});
-
-		serverProcess.on('error', (err) => {
-			console.error('Failed to start server process:', err);
-			serverProcess = null;
-			isRecording = false;
-			if (pendingContext === null) {
-				contextCollector.clear();
-			}
-			pendingContext = null;
-			refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
-		});
-
-		// Capture stdout, shown in debug console
-		serverProcess.stdout?.on('data', (data) => {
-			console.log(`[Server]: ${data.toString().trim()}`);
-		});
-	}
+		}
+	});
 
 	function handleStartRecording() {
-		if (isRecording) {
-			return;
-		}
-
-		startServer();
-		
-		const selectedDevice = getSelectedDevice();
-		contextCollector.startRecording();
-		
-		// Wait then send start 
-		setTimeout(async () => {
-			if (serverProcess && serverProcess.send) {
-				serverProcess.send({ command: 'start', device: selectedDevice });
-				isRecording = true;
-				await refreshStatusBar();
-			}
-		}, 100);
+		recordingService.startRecording();
+		refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 	}
 
 	function handleStopRecording() {
-		if (!isRecording || !serverProcess || !serverProcess.send) {
-			return; // Not recording
-		}
-
-		// Stop context collection and store the context
-		pendingContext = contextCollector.stopRecording();
-
-		serverProcess.send({ command: 'stop' });
+		recordingService.stopRecording();
 	}
 
 	async function handleSelectDevice(): Promise<void> {
@@ -504,7 +149,7 @@ export function activate(context: vscode.ExtensionContext) {
 			onSelectDevice: handleSelectDevice
 		};
 
-		await showStatusBarMenu(isRecording, deviceDisplayName, callbacks);
+		await showStatusBarMenu(recordingService.getIsRecording(), deviceDisplayName, callbacks);
 		await refreshStatusBar();
 	});
 

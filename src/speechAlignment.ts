@@ -1,28 +1,13 @@
 import * as vscode from 'vscode';
 import { RecordingContext } from './contextCollector';
+import { SpeakerSegment, ClassifiedSegment, TransformedSegment, SegmentClassification } from './types';
+import { CONTEXT_MATCH_PADDING_LINES, CODE_SNIPPET_PADDING_LINES, MAX_CANDIDATES_PER_SEGMENT } from './config/constants';
 
 export interface WordInfo {
 	word: string;
 	speakerTag: number;
 	startOffset: string;
 	endOffset: string;
-}
-
-export interface SpeakerSegment {
-	speakerTag: number;
-	text: string;
-	startTime: number;
-	endTime: number;
-}
-
-export type SegmentClassification = 'Ignore' | 'Question' | 'Concern' | 'Suggestion' | 'Style';
-
-export interface ClassifiedSegment extends SpeakerSegment {
-	classification: SegmentClassification;
-}
-
-export interface TransformedSegment extends ClassifiedSegment {
-	transformedText: string;
 }
 
 /**
@@ -209,6 +194,55 @@ function createRangeFromVisibleRange(document: vscode.TextDocument, visibleRange
 }
 
 /**
+ * Convert a candidate context to a range using fallback chain:
+ * 1. Cursor line
+ * 2. Visible symbols
+ * 3. Visible range start
+ * 4. File-level (line 0)
+ */
+async function convertCandidateToRange(
+	candidate: RecordingContext,
+	document: vscode.TextDocument
+): Promise<vscode.Range> {
+	const lineCount = document.lineCount;
+
+	// 1. Try cursor line
+	if (candidate.cursorLine >= 0 && candidate.cursorLine < lineCount) {
+		return createRangeFromLine(document, candidate.cursorLine);
+	}
+
+	// 2. Try visible symbols
+	if (candidate.symbolsInView && candidate.symbolsInView.length > 0) {
+		try {
+			const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+				'vscode.executeDocumentSymbolProvider',
+				document.uri
+			);
+
+			if (symbols && Array.isArray(symbols)) {
+				for (const symbolName of candidate.symbolsInView) {
+					const symbol = findSymbolByName(symbols, symbolName);
+					if (symbol) {
+						return createRangeFromSymbol(symbol, document);
+					}
+				}
+			}
+		} catch (error) {
+			console.warn('Failed to query document symbols for comment placement:', error);
+		}
+	}
+
+	// 3. Try visible range start
+	const visibleRange = createRangeFromVisibleRange(document, candidate.visibleRange);
+	if (visibleRange) {
+		return visibleRange;
+	}
+
+	// 4. File-level fallback (line 0)
+	return createRangeFromLine(document, 0);
+}
+
+/**
  * Extract code context around visible symbols from a document
  * Returns formatted code snippet with line numbers
  */
@@ -228,13 +262,11 @@ export async function extractCodeContext(
 			);
 
 			if (symbols && Array.isArray(symbols)) {
-				const PADDING = 2; // Lines of context around symbol
-				
 				for (const symbolName of context.symbolsInView) {
 					const symbol = findSymbolByName(symbols, symbolName);
 					if (symbol) {
-						const startLine = Math.max(0, symbol.range.start.line - PADDING);
-						const endLine = Math.min(lineCount - 1, symbol.range.end.line + PADDING);
+						const startLine = Math.max(0, symbol.range.start.line - CONTEXT_MATCH_PADDING_LINES);
+						const endLine = Math.min(lineCount - 1, symbol.range.end.line + CONTEXT_MATCH_PADDING_LINES);
 						
 						// Extract code lines
 						const lines: string[] = [];
@@ -303,8 +335,8 @@ export async function findCommentLocation(
 ): Promise<vscode.Range> {
 	const lineCount = document.lineCount;
 
-	// Get top 5 candidate contexts
-	const candidateContexts = findNearestContexts(segment.startTime, contexts, 5, currentFile);
+	// Get candidate contexts
+	const candidateContexts = findNearestContexts(segment.startTime, contexts, MAX_CANDIDATES_PER_SEGMENT, currentFile);
 
 	if (candidateContexts.length === 0) {
 		// Fallback: use file-level
@@ -348,38 +380,7 @@ export async function findCommentLocation(
 			    data.selectedIndex >= 0 && 
 			    data.selectedIndex < candidates.length) {
 				const selectedCandidate = candidateContexts[data.selectedIndex];
-				
-				// Convert to range - prefer cursor line, then first visible symbol
-				if (selectedCandidate.cursorLine >= 0 && selectedCandidate.cursorLine < lineCount) {
-					return createRangeFromLine(document, selectedCandidate.cursorLine);
-				}
-
-				// Try visible symbols
-				if (selectedCandidate.symbolsInView && selectedCandidate.symbolsInView.length > 0) {
-					try {
-						const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-							'vscode.executeDocumentSymbolProvider',
-							document.uri
-						);
-
-						if (symbols && Array.isArray(symbols)) {
-							for (const symbolName of selectedCandidate.symbolsInView) {
-								const symbol = findSymbolByName(symbols, symbolName);
-								if (symbol) {
-									return createRangeFromSymbol(symbol, document);
-								}
-							}
-						}
-					} catch (error) {
-						console.warn('Failed to query document symbols for comment placement:', error);
-					}
-				}
-
-				// Fallback to visible range start
-				const visibleRange = createRangeFromVisibleRange(document, selectedCandidate.visibleRange);
-				if (visibleRange) {
-					return visibleRange;
-				}
+				return await convertCandidateToRange(selectedCandidate, document);
 			}
 		}
 	} catch (error) {
@@ -388,35 +389,7 @@ export async function findCommentLocation(
 
 	// Fallback to heuristic: use first candidate (nearest context)
 	const fallbackContext = candidateContexts[0];
-	
-	// 1. Try cursor line
-	if (fallbackContext.cursorLine >= 0 && fallbackContext.cursorLine < lineCount) {
-		return createRangeFromLine(document, fallbackContext.cursorLine);
-	}
-
-	// 2. Try visible symbols
-	if (fallbackContext.symbolsInView && fallbackContext.symbolsInView.length > 0) {
-		try {
-			const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-				'vscode.executeDocumentSymbolProvider',
-				document.uri
-			);
-
-			if (symbols && Array.isArray(symbols)) {
-				for (const symbolName of fallbackContext.symbolsInView) {
-					const symbol = findSymbolByName(symbols, symbolName);
-					if (symbol) {
-						return createRangeFromSymbol(symbol, document);
-					}
-				}
-			}
-		} catch (error) {
-			console.warn('Failed to query document symbols for comment placement:', error);
-		}
-	}
-
-	// 3. File-level fallback (line 0)
-	return createRangeFromLine(document, 0);
+	return await convertCandidateToRange(fallbackContext, document);
 }
 
 /**
@@ -434,7 +407,7 @@ export async function findCommentLocationsBatch(
 
 	// Extract candidate contexts for all segments
 	const allCandidateContexts = segments.map(segment => 
-		findNearestContexts(segment.startTime, contexts, 5, currentFile)
+		findNearestContexts(segment.startTime, contexts, MAX_CANDIDATES_PER_SEGMENT, currentFile)
 	);
 
 	// Extract code context for all candidates in parallel
@@ -500,49 +473,9 @@ export async function findCommentLocationsBatch(
 			if (!selectedCandidate) {
 				// Fallback to file-level
 				ranges.push(createRangeFromLine(document, 0));
-				continue;
+			} else {
+				ranges.push(await convertCandidateToRange(selectedCandidate, document));
 			}
-
-			// Convert to range - prefer cursor line, then visible symbols, then visible range
-			if (selectedCandidate.cursorLine >= 0 && selectedCandidate.cursorLine < lineCount) {
-				ranges.push(createRangeFromLine(document, selectedCandidate.cursorLine));
-				continue;
-			}
-
-			// Try visible symbols
-			if (selectedCandidate.symbolsInView && selectedCandidate.symbolsInView.length > 0) {
-				try {
-					const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-						'vscode.executeDocumentSymbolProvider',
-						document.uri
-					);
-
-					if (symbols && Array.isArray(symbols)) {
-						for (const symbolName of selectedCandidate.symbolsInView) {
-							const symbol = findSymbolByName(symbols, symbolName);
-							if (symbol) {
-								ranges.push(createRangeFromSymbol(symbol, document));
-								break;
-							}
-						}
-						if (ranges.length === i + 1) {
-							continue; // Found a symbol, move to next segment
-						}
-					}
-				} catch (error) {
-					console.warn('Failed to query document symbols for comment placement:', error);
-				}
-			}
-
-			// Fallback to visible range start
-			const visibleRange = createRangeFromVisibleRange(document, selectedCandidate.visibleRange);
-			if (visibleRange) {
-				ranges.push(visibleRange);
-				continue;
-			}
-
-			// Final fallback: file-level
-			ranges.push(createRangeFromLine(document, 0));
 		}
 
 		return ranges;
