@@ -10,7 +10,6 @@ import { getDeviceDisplayName } from './utils/vscode';
 import { ServerManager } from './services/serverManager';
 import { RecordingService } from './services/recordingService';
 import { handleAudioMessage } from './handlers/audioMessageHandler';
-import { RECORDING_START_DELAY_MS } from './config/constants';
 
 let audioService: AudioService;
 

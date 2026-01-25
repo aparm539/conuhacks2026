@@ -19,23 +19,34 @@ export class RecordingService {
 
 	/**
 	 * Start recording
+	 * Note: Server should already be started by extension.ts - this method only sends the start command
 	 */
 	async startRecording(): Promise<void> {
 		if (this.isRecording) {
 			return;
 		}
 
-		this.serverManager.start();
+		// Server is already started in extension.ts, so we don't need to start it again here
+		// Just verify it's running before proceeding
+		if (!this.serverManager.isRunning()) {
+			console.warn('[RecordingService] Server not running, attempting to start...');
+			this.serverManager.start();
+		}
 		
 		const selectedDevice = getSelectedDevice();
+		
+		// Start context collection first, then send audio start command
+		// This ensures context timestamps align with audio recording start
 		this.contextCollector.startRecording();
 		
-		// Wait then send start command
-		setTimeout(async () => {
-			if (this.serverManager.send({ command: 'start', device: selectedDevice })) {
-				this.isRecording = true;
-			}
-		}, RECORDING_START_DELAY_MS);
+		// Send start command immediately (removed artificial delay)
+		// The delay was causing context/audio timing misalignment
+		if (this.serverManager.send({ command: 'start', device: selectedDevice })) {
+			this.isRecording = true;
+		} else {
+			console.error('[RecordingService] Failed to send start command to server');
+			this.contextCollector.stopRecording(); // Clean up if start failed
+		}
 	}
 
 	/**

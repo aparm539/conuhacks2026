@@ -29,24 +29,23 @@ export class AudioService {
 
     /**
      * Record audio from microphone
-     * Note: VS Code extensions run in Node.js, so we'll need to use
-     * a native module or external process for audio recording.
-     * This is a placeholder that shows the expected interface.
+     * 
+     * @deprecated This method is intentionally unimplemented. Audio recording is handled
+     * by the server process (src/server.ts) which uses node-audiorecorder and sox for
+     * system-level audio capture. The RecordingService manages the recording lifecycle
+     * through IPC communication with the server process.
+     * 
+     * This method exists only for backwards compatibility and will throw an error if called.
+     * Use RecordingService.startRecording() instead for live audio recording.
+     * 
+     * @throws Error Always throws an error indicating this method is not implemented
      */
     async recordAudio(durationSeconds: number = 30): Promise<string> {
-        // In a real implementation, you would:
-        // 1. Use a native Node.js module for audio recording (like node-record-lpcm16)
-        // 2. Or spawn a child process to use system audio recording tools
-        // 3. Save the audio to a temporary file
-        
-        const tempDir = this.getTempDir();
-        const audioPath = path.join(tempDir, `recording-${Date.now()}.wav`);
-        
-        // Placeholder: In real implementation, record audio here
-        // For now, we'll show an error that recording needs to be implemented
         throw new Error(
-            'Audio recording not yet implemented. ' +
-            'Please use an audio file or implement recording using a native module.'
+            'Audio recording via AudioService.recordAudio() is not implemented. ' +
+            'Audio recording is handled by the server process (src/server.ts) via RecordingService. ' +
+            'Use RecordingService.startRecording() instead for live audio recording, or ' +
+            'use processAudioFromFile() to process an existing audio file.'
         );
     }
 

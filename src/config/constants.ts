@@ -5,7 +5,6 @@
 // Recording and server
 export const TRANSCRIPTION_SERVER_URL = 'http://localhost:3000';
 export const DIARIZATION_SERVER_URL = 'http://localhost:8000';
-export const RECORDING_START_DELAY_MS = 100;
 
 // Context extraction
 export const CONTEXT_MATCH_PADDING_LINES = 2;

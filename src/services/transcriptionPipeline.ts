@@ -25,7 +25,26 @@ export async function transcribeAudio(audioData: Buffer, audioFilePath: string):
 }
 
 /**
+ * Process segments through unified pipeline (classify, split, transform)
+ * This replaces the previous 3-step process with a single API call
+ */
+export async function processSegments(segments: SpeakerSegment[]): Promise<TransformedSegment[]> {
+	const data = await transcriptionClient.post<{ segments: SpeakerSegment[] }, { transformedSegments?: TransformedSegment[] }>(
+		'/process-segments',
+		{ segments },
+		{ errorContext: 'Unified Processing' }
+	);
+	
+	if (!data.transformedSegments || !Array.isArray(data.transformedSegments)) {
+		throw new Error('No transformedSegments array in response');
+	}
+
+	return data.transformedSegments;
+}
+
+/**
  * Classify segments into categories
+ * @deprecated Use processSegments() instead for unified processing
  */
 export async function classifySegments(segments: SpeakerSegment[]): Promise<ClassifiedSegment[]> {
 	const data = await transcriptionClient.post<{ segments: SpeakerSegment[] }, { classifiedSegments?: ClassifiedSegment[] }>(
@@ -43,6 +62,7 @@ export async function classifySegments(segments: SpeakerSegment[]): Promise<Clas
 
 /**
  * Transform segments into comment text
+ * @deprecated Use processSegments() instead for unified processing
  */
 export async function transformSegments(classifiedSegments: ClassifiedSegment[]): Promise<TransformedSegment[]> {
 	const data = await transcriptionClient.post<{ classifiedSegments: ClassifiedSegment[] }, { transformedSegments?: TransformedSegment[] }>(
@@ -60,6 +80,7 @@ export async function transformSegments(classifiedSegments: ClassifiedSegment[])
 
 /**
  * Split segments based on topic and context
+ * @deprecated Use processSegments() instead for unified processing
  */
 export async function splitSegments(classifiedSegments: ClassifiedSegment[]): Promise<ClassifiedSegment[]> {
 	const data = await transcriptionClient.post<{ classifiedSegments: ClassifiedSegment[] }, { splitSegments?: ClassifiedSegment[] }>(
@@ -97,20 +118,10 @@ export async function processAudioPipeline(
 			throw new Error('No segments found');
 		}
 		
-		// Classify segments
-		progress.report({ increment: 20, message: `Classifying ${segments.length} segments...` });
-		const classifiedSegments = await classifySegments(segments);
-		console.log(`[EXTENSION] Classified ${segments.length} segments into ${classifiedSegments.length} classified segments`);
-		
-		// Split segments based on topic and context
-		progress.report({ increment: 20, message: `Splitting ${classifiedSegments.length} segments...` });
-		const splitClassifiedSegments = await splitSegments(classifiedSegments);
-		console.log(`[EXTENSION] Split ${classifiedSegments.length} segments into ${splitClassifiedSegments.length} split segments`);
-		
-		// Transform segments
-		progress.report({ increment: 20, message: `Transforming ${splitClassifiedSegments.length} segments...` });
-		const transformedSegments = await transformSegments(splitClassifiedSegments);
-		console.log(`[EXTENSION] Transformed ${splitClassifiedSegments.length} segments into ${transformedSegments.length} transformed segments`);
+		// Process segments through unified pipeline (classify, split, transform in one call)
+		progress.report({ increment: 20, message: `Processing ${segments.length} segments...` });
+		const transformedSegments = await processSegments(segments);
+		console.log(`[EXTENSION] Processed ${segments.length} segments into ${transformedSegments.length} transformed segments`);
 		
 		// Log classification breakdown
 		const classificationCounts = transformedSegments.reduce((acc, seg) => {
@@ -119,7 +130,7 @@ export async function processAudioPipeline(
 		}, {} as Record<string, number>);
 		console.log(`[EXTENSION] Classification breakdown:`, classificationCounts);
 		
-		progress.report({ increment: 20, message: "Complete!" });
+		progress.report({ increment: 60, message: "Complete!" });
 		return transformedSegments;
 	});
 }
