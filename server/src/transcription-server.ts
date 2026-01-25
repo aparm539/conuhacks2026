@@ -4,16 +4,39 @@ import dotenv from 'dotenv';
 import { SpeechClient } from '@google-cloud/speech';
 import type { protos } from '@google-cloud/speech';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import FormData from 'form-data';
+import axios from 'axios';
 
 // Load environment variables
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
+const DIAR_SERVICE_URL = process.env.DIAR_SERVICE_URL || 'http://localhost:8000';
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
+
+// Health check endpoint
+app.get('/health', (req: Request, res: Response) => {
+  console.log('[HEALTH] Health check requested');
+  res.json({ 
+    status: 'healthy', 
+    service: 'transcription-server',
+    timestamp: new Date().toISOString(),
+    speechClientInitialized: speechClient !== null,
+    geminiClientInitialized: geminiClient !== null
+  });
+});
 
 let speechClient: SpeechClient | null = null;
 let geminiClient: GoogleGenerativeAI | null = null;
@@ -79,6 +102,22 @@ interface LocationSelectionRequest {
 interface LocationSelectionResponse {
   selectedIndex: number;
   rationale?: string;
+}
+
+// Diar-service types
+interface DiarizationSpeakerSegment {
+  speaker: string;
+  start: number;
+  end: number;
+  duration: number;
+}
+
+interface DiarizationResponse {
+  success: boolean;
+  segments: DiarizationSpeakerSegment[];
+  total_speakers: number;
+  total_duration: number;
+  message?: string;
 }
 
 function initializeSpeechClient(): void {
@@ -781,9 +820,156 @@ Selection:`;
   };
 }
 
+/**
+ * Call diar-service to get speaker segments
+ */
+async function getDiarization(audioBuffer: Buffer): Promise<DiarizationResponse> {
+  const tempFilePath = path.join(os.tmpdir(), `audio-${Date.now()}.wav`);
+  
+  try {
+    // Write audio buffer to temporary file
+    fs.writeFileSync(tempFilePath, audioBuffer);
+    
+    // Create FormData for multipart/form-data upload
+    const formData = new FormData();
+    formData.append('audio', fs.createReadStream(tempFilePath), {
+      filename: 'audio.wav',
+      contentType: 'audio/wav'
+    });
+    
+    // Call diar-service using axios (better form-data support)
+    const response = await axios.post<DiarizationResponse>(
+      `${DIAR_SERVICE_URL}/process`,
+      formData,
+      {
+        headers: formData.getHeaders(),
+        timeout: 300000, // 5 minute timeout for diarization
+      }
+    );
+    
+    const result = response.data;
+    
+    if (!result.success) {
+      throw new Error(`Diarization failed: ${result.message || 'Unknown error'}`);
+    }
+    
+    return result;
+  } catch (error) {
+    // Handle axios errors specifically
+    if (axios.isAxiosError(error)) {
+      if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+        throw new Error(`Cannot connect to diar-service at ${DIAR_SERVICE_URL}. Is it running?`);
+      }
+      if (error.code === 'ETIMEDOUT' || error.message.includes('timeout')) {
+        throw new Error('Diar-service request timed out');
+      }
+      if (error.response) {
+        // Server responded with error status
+        const status = error.response.status;
+        const errorData = error.response.data;
+        throw new Error(`Diar-service returned ${status}: ${errorData?.message || errorData?.error || error.message}`);
+      }
+      throw new Error(`Diar-service request failed: ${error.message}`);
+    }
+    // Re-throw other errors
+    throw error;
+  } finally {
+    // Clean up temporary file
+    try {
+      if (fs.existsSync(tempFilePath)) {
+        fs.unlinkSync(tempFilePath);
+      }
+    } catch (error) {
+      console.warn(`Failed to delete temp file ${tempFilePath}:`, error);
+    }
+  }
+}
+
+/**
+ * Match transcribed words to speaker segments based on timestamps
+ */
+function matchWordsToSpeakers(
+  words: Array<{ word: string; startOffset: string; endOffset: string }>,
+  diarizationSegments: DiarizationSpeakerSegment[]
+): Array<{ word: string; speakerTag: number; startOffset: string; endOffset: string }> {
+  // Helper to parse duration string (e.g., "1.100s" or "1s") to seconds
+  const parseDuration = (durationStr: string): number => {
+    const match = durationStr.match(/^(\d+(?:\.\d+)?)s?$/);
+    if (!match) return 0;
+    return parseFloat(match[1]);
+  };
+  
+  // Extract speaker number from speaker label (e.g., "SPEAKER_00" -> 0)
+  const getSpeakerNumber = (speakerLabel: string): number => {
+    const match = speakerLabel.match(/SPEAKER_(\d+)/);
+    return match ? parseInt(match[1], 10) : 0;
+  };
+  
+  // Sort segments by start time for efficient lookup
+  const sortedSegments = [...diarizationSegments].sort((a, b) => a.start - b.start);
+  
+  return words.map(word => {
+    const wordStartTime = parseDuration(word.startOffset);
+    const wordEndTime = parseDuration(word.endOffset);
+    
+    // Find segments that overlap with this word
+    // A segment overlaps if: segment.start <= word.startTime < segment.end
+    // or if the word spans across segment boundaries
+    let bestSegment: DiarizationSpeakerSegment | null = null;
+    let maxOverlap = 0;
+    
+    for (const segment of sortedSegments) {
+      // Check if word overlaps with segment
+      const overlapStart = Math.max(wordStartTime, segment.start);
+      const overlapEnd = Math.min(wordEndTime, segment.end);
+      
+      if (overlapStart < overlapEnd) {
+        const overlap = overlapEnd - overlapStart;
+        if (overlap > maxOverlap) {
+          maxOverlap = overlap;
+          bestSegment = segment;
+        }
+      }
+    }
+    
+    // If no segment found, try to find the closest segment
+    if (!bestSegment && sortedSegments.length > 0) {
+      // Find the segment with the smallest distance to word start
+      let closestSegment = sortedSegments[0];
+      let minDistance = Math.abs(wordStartTime - closestSegment.start);
+      
+      for (const segment of sortedSegments) {
+        const distance = Math.min(
+          Math.abs(wordStartTime - segment.start),
+          Math.abs(wordStartTime - segment.end)
+        );
+        if (distance < minDistance) {
+          minDistance = distance;
+          closestSegment = segment;
+        }
+      }
+      bestSegment = closestSegment;
+    }
+    
+    const speakerTag = bestSegment ? getSpeakerNumber(bestSegment.speaker) : 0;
+    
+    return {
+      word: word.word,
+      speakerTag,
+      startOffset: word.startOffset,
+      endOffset: word.endOffset
+    };
+  });
+}
+
 app.post('/transcribe', async (req: Request, res: Response) => {
+  console.log('[TRANSCRIBE] Request received at', new Date().toISOString());
+  console.log('[TRANSCRIBE] Request body keys:', Object.keys(req.body));
+  console.log('[TRANSCRIBE] Audio data length:', req.body.audio ? req.body.audio.length : 'missing');
+  
   try {
     if (!speechClient) {
+      console.error('[TRANSCRIBE] ERROR: Speech client not initialized');
       return res.status(500).json({ 
         error: 'Speech client not initialized. Check server logs for credential errors.' 
       });
@@ -799,21 +985,39 @@ app.post('/transcribe', async (req: Request, res: Response) => {
 
     // Convert base64 string to Buffer
     const audioBuffer = Buffer.from(audio, 'base64');
+    console.log('[TRANSCRIBE] Audio buffer size:', audioBuffer.length, 'bytes');
 
-    const diarizationConfig: protos.google.cloud.speech.v1.ISpeakerDiarizationConfig = {
-      enableSpeakerDiarization: true,
-      minSpeakerCount: 1,
-      maxSpeakerCount: 10,
-    };
+    // Validate audio buffer is not empty
+    if (audioBuffer.length === 0) {
+      console.error('[TRANSCRIBE] ERROR: Audio buffer is empty');
+      return res.status(400).json({ 
+        error: 'Audio buffer is empty. Please provide valid audio data.' 
+      });
+    }
 
+    // Google Cloud Speech API config WITHOUT diarization
+    // Use auto-detection for encoding and sample rate for better compatibility
     const config: protos.google.cloud.speech.v1.IRecognitionConfig = {
-      encoding: 'LINEAR16',
-      sampleRateHertz: 16000,
+      encoding: 'LINEAR16', // Default, but can be overridden
+      sampleRateHertz: 16000, // Default, but can be overridden
       languageCode: 'en-US',
-      diarizationConfig: diarizationConfig,
       enableWordTimeOffsets: true,
+      // Allow alternative encodings to be detected
+      alternativeLanguageCodes: [],
+      // Use enhanced model for better accuracy
+      useEnhanced: true,
     };
 
+    // Try to detect if audio is in a different format
+    // Check for WAV header (RIFF...WAVE)
+    const isWav = audioBuffer.length >= 12 && 
+                  audioBuffer.toString('ascii', 0, 4) === 'RIFF' &&
+                  audioBuffer.toString('ascii', 8, 12) === 'WAVE';
+    
+    // If it's a WAV file, we need to extract the raw PCM data
+    // For now, let's try with the raw buffer and see if Google can handle it
+    // If not, we'll need to add audio conversion logic
+    
     const audioConfig: protos.google.cloud.speech.v1.IRecognitionAudio = {
       content: audioBuffer,
     };
@@ -823,11 +1027,91 @@ app.post('/transcribe', async (req: Request, res: Response) => {
       audio: audioConfig,
     };
 
+    console.log('[TRANSCRIBE] Calling Google Cloud Speech API...');
     const [response] = await speechClient.recognize(request);
+    console.log('[TRANSCRIBE] Google Cloud Speech API response received. Results count:', response.results?.length || 0);
 
     if (!response.results || response.results.length === 0) {
+      console.warn('[TRANSCRIBE] No results from Google Cloud Speech API, trying alternative configurations...');
+      // If auto-detection failed, try with LINEAR16 at common sample rates
+      console.log('Auto-detection failed, trying LINEAR16 at common sample rates...');
+      
+      const sampleRates = [16000, 44100, 48000];
+      for (const sampleRate of sampleRates) {
+        try {
+          const altRequest: protos.google.cloud.speech.v1.IRecognizeRequest = {
+            config: {
+              encoding: 'LINEAR16',
+              sampleRateHertz: sampleRate,
+              languageCode: 'en-US',
+              enableWordTimeOffsets: true,
+              useEnhanced: true,
+            },
+            audio: audioConfig,
+          };
+          
+          const [altResponse] = await speechClient.recognize(altRequest);
+          if (altResponse.results && altResponse.results.length > 0) {
+            console.log(`Success with LINEAR16/${sampleRate}Hz`);
+            // Process the successful response
+            const lastResult = altResponse.results[altResponse.results.length - 1];
+            const alternative = lastResult.alternatives?.[0];
+            
+            if (alternative && alternative.words) {
+              // Use the same processing logic below
+              const formatDuration = (duration: protos.google.protobuf.IDuration | null | undefined): string => {
+                if (!duration) return '0s';
+                const seconds = duration.seconds || 0;
+                const nanos = duration.nanos || 0;
+                const totalSeconds = Number(seconds) + (nanos / 1000000000);
+                if (totalSeconds === Math.floor(totalSeconds)) {
+                  return `${totalSeconds}s`;
+                }
+                return `${totalSeconds.toFixed(3)}s`;
+              };
+
+              const wordsWithoutSpeakers = alternative.words.map((wordInfo: protos.google.cloud.speech.v1.IWordInfo) => ({
+                word: wordInfo.word || '',
+                startOffset: formatDuration(wordInfo.startTime),
+                endOffset: formatDuration(wordInfo.endTime),
+              }));
+
+              let words: Array<{ word: string; speakerTag: number; startOffset: string; endOffset: string }>;
+              try {
+                console.log('Calling diar-service for speaker diarization...');
+                const diarizationResult = await getDiarization(audioBuffer);
+                console.log(`Diarization successful: ${diarizationResult.segments.length} segments, ${diarizationResult.total_speakers} speakers`);
+                words = matchWordsToSpeakers(wordsWithoutSpeakers, diarizationResult.segments);
+              } catch (error) {
+                console.error('Diar-service error:', error);
+                console.warn('Falling back to words without speaker tags');
+                words = wordsWithoutSpeakers.map(w => ({
+                  ...w,
+                  speakerTag: 0
+                }));
+              }
+
+              if (!words || !Array.isArray(words)) {
+                console.error('Words array is invalid, using fallback');
+                words = wordsWithoutSpeakers.map(w => ({
+                  ...w,
+                  speakerTag: 0
+                }));
+              }
+
+              return res.json({ words });
+            }
+          }
+        } catch (altError) {
+          console.log(`Failed with LINEAR16/${sampleRate}Hz:`, altError);
+          continue;
+        }
+      }
+      
+      // If all attempts failed, provide helpful error message
+      const formatHint = isWav ? 'WAV file detected. ' : '';
       return res.status(404).json({ 
-        error: 'No transcription results returned from Google Cloud Speech API' 
+        error: `No transcription results returned from Google Cloud Speech API. ${formatHint}Audio buffer size: ${audioBuffer.length} bytes. The audio format may not be supported. Please ensure the audio is in LINEAR16 PCM format (raw or WAV) at 16kHz, 44.1kHz, or 48kHz.`
       });
     }
 
@@ -856,18 +1140,47 @@ app.post('/transcribe', async (req: Request, res: Response) => {
       return `${totalSeconds.toFixed(3)}s`;
     };
 
-    // Map words to include speaker tags and timestamps
-    const words = alternative.words.map((wordInfo: protos.google.cloud.speech.v1.IWordInfo) => ({
+    // Map words to include timestamps (without speaker tags yet)
+    const wordsWithoutSpeakers = alternative.words.map((wordInfo: protos.google.cloud.speech.v1.IWordInfo) => ({
       word: wordInfo.word || '',
-      speakerTag: wordInfo.speakerTag || 0,
       startOffset: formatDuration(wordInfo.startTime),
       endOffset: formatDuration(wordInfo.endTime),
     }));
 
+    // Get diarization from diar-service
+    let words: Array<{ word: string; speakerTag: number; startOffset: string; endOffset: string }>;
+    try {
+      console.log('Calling diar-service for speaker diarization...');
+      const diarizationResult = await getDiarization(audioBuffer);
+      console.log(`Diarization successful: ${diarizationResult.segments.length} segments, ${diarizationResult.total_speakers} speakers`);
+      
+      // Match words to speaker segments
+      words = matchWordsToSpeakers(wordsWithoutSpeakers, diarizationResult.segments);
+    } catch (error) {
+      console.error('Diar-service error:', error);
+      // Fallback: return words without speaker tags (default to 0)
+      console.warn('Falling back to words without speaker tags');
+      words = wordsWithoutSpeakers.map(w => ({
+        ...w,
+        speakerTag: 0
+      }));
+    }
+
+    // Ensure words is always defined and is an array
+    if (!words || !Array.isArray(words)) {
+      console.error('Words array is invalid, using fallback');
+      words = wordsWithoutSpeakers.map(w => ({
+        ...w,
+        speakerTag: 0
+      }));
+    }
+
+    console.log('[TRANSCRIBE] Success! Returning', words.length, 'words');
     res.json({ words });
   } catch (error) {
-    console.error('Transcription error:', error);
+    console.error('[TRANSCRIBE] ERROR:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    console.error('[TRANSCRIBE] Error stack:', error instanceof Error ? error.stack : 'No stack trace');
     res.status(500).json({ error: `Transcription failed: ${errorMessage}` });
   }
 });
@@ -1105,11 +1418,15 @@ app.post('/select-comment-location', async (req: Request<{}, LocationSelectionRe
 });
 
 app.listen(PORT, () => {
+  console.log(`========================================`);
   console.log(`Transcription server running on port ${PORT}`);
+  console.log(`Server started at: ${new Date().toISOString()}`);
+  console.log(`========================================`);
   if (!speechClient) {
     console.warn('WARNING: Speech client not initialized. Transcription requests will fail.');
   }
   if (!geminiClient) {
     console.warn('WARNING: Gemini client not initialized. Classification requests will fail.');
   }
+  console.log('Server is ready to accept requests...');
 });
