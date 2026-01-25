@@ -39,6 +39,11 @@
       {
         "command": "pr-notes.stopRecording",
         "title": "Stop Recording"
+      },
+      {
+        "command": "pr-notes.login",
+        "title": "Sign in with GitHub",
+        "category": "PR Notes"
       }
     ],
     "configuration": {
