@@ -13,7 +13,7 @@ export interface WordInfo {
 /**
  * Parse timestamp string (e.g., "1.100s") to seconds as a float
  */
-export function parseTimestamp(offset: string): number {
+function parseTimestamp(offset: string): number {
 	// Remove 's' suffix if present
 	const cleaned = offset.replace(/s$/, '');
 	return parseFloat(cleaned) || 0;
@@ -61,46 +61,6 @@ export function groupWordsBySpeaker(words: WordInfo[]): SpeakerSegment[] {
 	}
 
 	return segments;
-}
-
-/**
- * Find the context snapshot with the closest timestamp to the given time
- * Prefers contexts matching the current file if provided
- */
-export function findNearestContext(
-	timestamp: number,
-	contexts: RecordingContext[],
-	currentFile?: string
-): RecordingContext | null {
-	if (contexts.length === 0) {
-		return null;
-	}
-
-	// Filter contexts matching current file if provided
-	let candidates = contexts;
-	if (currentFile) {
-		const matchingFile = contexts.filter(ctx => ctx.file === currentFile);
-		if (matchingFile.length > 0) {
-			candidates = matchingFile;
-		} else {
-			// Log warning but use all contexts
-			console.warn(`No context snapshots found for file ${currentFile}, using any available context`);
-		}
-	}
-
-	// Find context with minimum absolute time difference
-	let nearest: RecordingContext = candidates[0];
-	let minDiff = Math.abs(candidates[0].timestamp - timestamp);
-
-	for (const context of candidates) {
-		const diff = Math.abs(context.timestamp - timestamp);
-		if (diff < minDiff) {
-			minDiff = diff;
-			nearest = context;
-		}
-	}
-
-	return nearest;
 }
 
 /**
@@ -322,75 +282,7 @@ export async function extractCodeContext(
 	return codeSnippets.join('\n\n') || '(No code context available)';
 }
 
-/**
- * Find the best location for a comment using Gemini API
- * Falls back to heuristic if Gemini fails
- */
-export async function findCommentLocation(
-	segment: TransformedSegment,
-	contexts: RecordingContext[],
-	document: vscode.TextDocument,
-	currentFile: string,
-	serverUrl: string = 'http://localhost:3000'
-): Promise<vscode.Range> {
-	const lineCount = document.lineCount;
 
-	// Get candidate contexts
-	const candidateContexts = findNearestContexts(segment.startTime, contexts, MAX_CANDIDATES_PER_SEGMENT, currentFile);
-
-	if (candidateContexts.length === 0) {
-		// Fallback: use file-level
-		return createRangeFromLine(document, 0);
-	}
-
-	// Extract code context for each candidate
-	const candidates = await Promise.all(
-		candidateContexts.map(async (context) => {
-			const codeContext = await extractCodeContext(context, document);
-			return {
-				timestamp: context.timestamp,
-				file: context.file,
-				cursorLine: context.cursorLine,
-				visibleRange: context.visibleRange,
-				symbolsInView: context.symbolsInView,
-				codeContext: codeContext
-			};
-		})
-	);
-
-	// Try to use Gemini API for location selection
-	try {
-		const response = await fetch(`${serverUrl}/select-comment-location`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				commentText: segment.transformedText,
-				classification: segment.classification,
-				candidates: candidates,
-				fileName: currentFile,
-			}),
-		});
-
-		if (response.ok) {
-			const data = await response.json() as { selectedIndex: number; rationale?: string };
-			
-			if (typeof data.selectedIndex === 'number' && 
-			    data.selectedIndex >= 0 && 
-			    data.selectedIndex < candidates.length) {
-				const selectedCandidate = candidateContexts[data.selectedIndex];
-				return await convertCandidateToRange(selectedCandidate, document);
-			}
-		}
-	} catch (error) {
-		console.warn('Failed to use Gemini for location selection, falling back to heuristic:', error);
-	}
-
-	// Fallback to heuristic: use first candidate (nearest context)
-	const fallbackContext = candidateContexts[0];
-	return await convertCandidateToRange(fallbackContext, document);
-}
 
 /**
  * Find the best locations for multiple comments using batch API
@@ -481,13 +373,7 @@ export async function findCommentLocationsBatch(
 		return ranges;
 	} catch (error) {
 		console.warn('Failed to use batch API for location selection, falling back to individual calls:', error);
-		// Fallback to individual calls
-		const ranges: vscode.Range[] = [];
-		for (const segment of segments) {
-			const range = await findCommentLocation(segment, contexts, document, currentFile, serverUrl);
-			ranges.push(range);
-		}
-		return ranges;
+		return []
 	}
 }
 

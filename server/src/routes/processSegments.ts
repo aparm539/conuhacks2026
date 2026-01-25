@@ -9,15 +9,15 @@ import type {
   TransformedSegment 
 } from '../types/index';
 
-export interface ProcessSegmentsRequest {
+interface ProcessSegmentsRequest {
   segments: SpeakerSegment[];
 }
 
-export interface ProcessSegmentsResponse {
+interface ProcessSegmentsResponse {
   transformedSegments: TransformedSegment[];
 }
 
-export interface ProcessSegmentsErrorResponse {
+interface ProcessSegmentsErrorResponse {
   transformedSegments: [];
   error: string;
 }

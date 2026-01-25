@@ -4,7 +4,7 @@ import { VALID_CLASSIFICATIONS } from '../types';
 /**
  * Validate a SpeakerSegment structure
  */
-export function validateSpeakerSegment(segment: any): segment is SpeakerSegment {
+function validateSpeakerSegment(segment: any): segment is SpeakerSegment {
   return (
     typeof segment === 'object' &&
     segment !== null &&
@@ -18,7 +18,7 @@ export function validateSpeakerSegment(segment: any): segment is SpeakerSegment 
 /**
  * Validate a ClassifiedSegment structure
  */
-export function validateClassifiedSegment(segment: any): segment is ClassifiedSegment {
+function validateClassifiedSegment(segment: any): segment is ClassifiedSegment {
   if (!validateSpeakerSegment(segment)) {
     return false;
   }

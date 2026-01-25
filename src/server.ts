@@ -6,12 +6,11 @@ const chunks: any[] = [];
 
 function startRecording() {
     if (recorder) {
-        console.log("Already recording");
         return;
     }
     // TODO: prevent recording from starting if there is audio that has not been saved to file
     console.log("Starting recording");
-    // Always use default device - no device option means system default
+
     const options: any = { program: 'sox', silence: 0 };
     recorder = new AudioRecorder(options, console);
     chunks.length = 0; 
@@ -19,7 +18,6 @@ function startRecording() {
     stream = recorder.start().stream();
 
     stream.on('data', (chunk: any) => {
-        console.log("data is being picked up in server");
         chunks.push(chunk);
     });
 

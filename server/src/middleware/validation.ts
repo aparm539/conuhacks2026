@@ -37,7 +37,7 @@ export function validateArray<T>(arr: unknown, name: string): T[] {
  * Validate candidate location structure
  * Throws ApiError if validation fails
  */
-export function validateCandidateLocation(candidate: unknown, index?: number): void {
+function validateCandidateLocation(candidate: unknown, index?: number): void {
 	const prefix = index !== undefined ? `at index ${index}` : '';
 	
 	if (!candidate || typeof candidate !== 'object') {

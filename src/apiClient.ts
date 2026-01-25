@@ -54,18 +54,6 @@ export class DiarizationApiClient {
     }
 
     /**
-     * Process audio from a buffer (useful for streaming)
-     */
-    async processAudioBuffer(
-        audioBuffer: ArrayBuffer,
-        filename: string = 'audio.wav',
-        mimeType: string = 'audio/wav'
-    ): Promise<DiarizationResponse> {
-        const blob = new Blob([audioBuffer], { type: mimeType });
-        return this.processAudio(blob);
-    }
-
-    /**
      * Get the base URL of the API
      */
     getBaseUrl(): string {

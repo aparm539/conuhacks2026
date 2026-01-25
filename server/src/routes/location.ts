@@ -12,7 +12,7 @@ import type {
 } from '../types/index';
 import { VALID_CLASSIFICATIONS } from '../types';
 import { asyncHandler } from '../middleware/errorHandler';
-import { requireGeminiClient, validateArray, validateCandidateLocation, validateCandidateLocations } from '../middleware/validation';
+import { requireGeminiClient, validateArray, validateCandidateLocations } from '../middleware/validation';
 
 export function createLocationRoute(geminiClient: GoogleGenerativeAI | null) {
   return asyncHandler(async (

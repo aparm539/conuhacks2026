@@ -64,7 +64,4 @@ export async function createComments(
 		// Create comment thread at the determined location
 		commentController.createCommentThread(document.uri, range, [comment]);
 	}
-
-	// Show completion message
-	vscode.window.showInformationMessage(`Created ${segmentsToComment.length} comment(s) in ${currentFile}`);
 }

@@ -60,7 +60,7 @@ async function processBatch<TInput, TOutput>(
 /**
  * Classify a batch of segments with surrounding context
  */
-export async function classifySegmentsBatch(
+async function classifySegmentsBatch(
   segments: SpeakerSegment[],
   contextBefore: SpeakerSegment[],
   contextAfter: SpeakerSegment[],
@@ -144,7 +144,7 @@ export async function classifySegmentsSequentially(
 /**
  * Transform a batch of classified segments into polished review comments
  */
-export async function transformSegmentsBatch(
+async function transformSegmentsBatch(
   segments: ClassifiedSegment[],
   contextBefore: ClassifiedSegment[],
   contextAfter: ClassifiedSegment[],
@@ -265,7 +265,7 @@ export async function transformSegmentsSequentially(
  * Split a batch of segments based on topic and context
  * Returns an array of split decisions: each element is either "keep" or an array of split text parts
  */
-export async function splitSegmentsBatch(
+async function splitSegmentsBatch(
   segments: ClassifiedSegment[],
   contextBefore: ClassifiedSegment[],
   contextAfter: ClassifiedSegment[],

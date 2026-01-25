@@ -29,7 +29,7 @@ export async function transcribeAudio(audioData: Buffer, audioFilePath: string):
  * Process segments through unified pipeline (classify, split, transform)
  * This replaces the previous 3-step process with a single API call
  */
-export async function processSegments(segments: SpeakerSegment[]): Promise<TransformedSegment[]> {
+async function processSegments(segments: SpeakerSegment[]): Promise<TransformedSegment[]> {
 	const data = await transcriptionClient.post<{ segments: SpeakerSegment[] }, { transformedSegments?: TransformedSegment[] }>(
 		'/process-segments',
 		{ segments },

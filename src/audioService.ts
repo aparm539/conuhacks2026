@@ -80,11 +80,4 @@ export class AudioService {
         return output;
     }
 
-    /**
-     * Format diarization results as JSON
-     */
-    formatResultsAsJson(results: DiarizationResponse): string {
-        return JSON.stringify(results, null, 2);
-    }
-
 }
