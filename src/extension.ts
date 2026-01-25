@@ -5,8 +5,6 @@ import * as vscode from 'vscode';
 import { AudioService } from './audioService';
 import { DiarizationApiClient } from './apiClient';
 import { createStatusBarItem, updateStatusBar, showStatusBarMenu, StatusBarCallbacks } from './statusBar';
-import { getSelectedDevice, selectAudioDevice } from './audioDeviceManager';
-import { getDeviceDisplayName } from './utils/vscode';
 import { ServerManager } from './services/serverManager';
 import { RecordingService } from './services/recordingService';
 import { handleAudioMessage } from './handlers/audioMessageHandler';
@@ -25,13 +23,6 @@ export function activate(context: vscode.ExtensionContext) {
 	const apiClient = new DiarizationApiClient();
 	audioService = new AudioService(context, apiClient);
 
-	// Check service health on activation
-	audioService.checkServiceHealth().then(isHealthy => {
-		if (isHealthy) {
-			console.log('Diarization service is ready');
-		}
-	});
-
 	// Recording functionality setup
 	const serverManager = new ServerManager(context.extensionPath);
 	const recordingService = new RecordingService(serverManager);
@@ -42,26 +33,24 @@ export function activate(context: vscode.ExtensionContext) {
 	const statusBarItem = createStatusBarItem();
 	statusBarItem.command = "pr-notes.showMenu";
 
-	async function refreshStatusBar() {
-		const selectedDeviceId = getSelectedDevice();
-		const deviceDisplayName = await getDeviceDisplayName(selectedDeviceId);
-		updateStatusBar(statusBarItem, recordingService.getIsRecording(), deviceDisplayName);
+	function refreshStatusBar() {
+		updateStatusBar(statusBarItem, recordingService.getIsRecording());
 	}
 
 	// Initial status bar update
-	refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+	refreshStatusBar();
 
 	// Setup server manager callbacks
 	serverManager.start({
 		onClose: () => {
 			recordingService.setIsRecording(false);
 			recordingService.clearContext();
-			refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+			refreshStatusBar();
 		},
 		onError: () => {
 			recordingService.setIsRecording(false);
 			recordingService.clearContext();
-			refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+			refreshStatusBar();
 		},
 		onMessage: async (message: { type: string; data: string }) => {
 			console.log("We have a message");
@@ -76,7 +65,7 @@ export function activate(context: vscode.ExtensionContext) {
 					{ commentController },
 					() => {
 						recordingService.setIsRecording(false);
-						refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+						refreshStatusBar();
 					}
 				);
 			}
@@ -85,21 +74,11 @@ export function activate(context: vscode.ExtensionContext) {
 
 	function handleStartRecording() {
 		recordingService.startRecording();
-		refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+		refreshStatusBar();
 	}
 
 	function handleStopRecording() {
 		recordingService.stopRecording();
-	}
-
-	async function handleSelectDevice(): Promise<void> {
-		const selectedDeviceId = await selectAudioDevice();
-		if (selectedDeviceId) {
-			await refreshStatusBar();
-			// Look up device name for the message
-			const deviceName = await getDeviceDisplayName(selectedDeviceId) || selectedDeviceId;
-			vscode.window.showInformationMessage(`Audio input device set to: ${deviceName}`);
-		}
 	}
 
 	// Register command for processing audio file (diarisation)
@@ -127,29 +106,15 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	});
 
-	// Register command for checking service health (diarisation)
-	const checkHealthDisposable = vscode.commands.registerCommand('pr-notes.checkHealth', async () => {
-		const isHealthy = await audioService.checkServiceHealth();
-		if (isHealthy) {
-			vscode.window.showInformationMessage('Diarization service is healthy and ready!');
-		} else {
-			vscode.window.showWarningMessage('Diarization service is not available. Please check the Docker container.');
-		}
-	});
-
 	// Status bar menu command (recording)
 	const showMenuDisposable = vscode.commands.registerCommand('pr-notes.showMenu', async () => {
-		const selectedDeviceId = getSelectedDevice();
-		const deviceDisplayName = await getDeviceDisplayName(selectedDeviceId);
-
 		const callbacks: StatusBarCallbacks = {
 			onStartRecording: handleStartRecording,
-			onStopRecording: handleStopRecording,
-			onSelectDevice: handleSelectDevice
+			onStopRecording: handleStopRecording
 		};
 
-		await showStatusBarMenu(recordingService.getIsRecording(), deviceDisplayName, callbacks);
-		await refreshStatusBar();
+		await showStatusBarMenu(recordingService.getIsRecording(), callbacks);
+		refreshStatusBar();
 	});
 
 	// The command has been defined in the package.json file
@@ -164,7 +129,6 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(statusBarItem);
 	context.subscriptions.push(commentController);
 	context.subscriptions.push(processAudioDisposable);
-	context.subscriptions.push(checkHealthDisposable);
 	context.subscriptions.push(showMenuDisposable);
 	context.subscriptions.push(helloWorldDisposable);
 }

@@ -490,3 +490,5 @@ export async function findCommentLocationsBatch(
 		return ranges;
 	}
 }
+
+export { TransformedSegment };

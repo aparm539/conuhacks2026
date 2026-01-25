@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { WordInfo, TransformedSegment } from '../speechAlignment';
+import { WordInfo } from '../speechAlignment';
 import { RecordingContext } from '../contextCollector';
 import { transcribeAudio, processAudioPipeline } from '../services/transcriptionPipeline';
 import { createComments } from './commentHandler';
@@ -123,15 +123,7 @@ export async function handleAudioMessage(
 		const transformedSegments = await processAudioPipeline(words, contexts || []);
 		
 		// Create comments aligned to code using context snapshots with transformed text
-		const segmentsToComment = transformedSegments.filter(seg => seg.classification !== 'Ignore');
-		await vscode.window.withProgress({
-			location: vscode.ProgressLocation.Notification,
-			title: "Finding Comment Locations",
-			cancellable: false
-		}, async (progress) => {
-			progress.report({ increment: 0, message: `Finding locations for ${segmentsToComment.length} comments...` });
-			await createComments(transformedSegments, contexts || [], config.commentController);
-		});
+		await createComments(transformedSegments, contexts || [], config.commentController);
 	} catch (error) {
 		console.error('Transcription failed:', error);
 		const errorMessage = error instanceof Error ? error.message : 'Unknown error';

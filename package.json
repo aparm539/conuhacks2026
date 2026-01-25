@@ -23,11 +23,6 @@
         "category": "PR Notes"
       },
       {
-        "command": "pr-notes.checkHealth",
-        "title": "Check Diarization Service Health",
-        "category": "PR Notes"
-      },
-      {
         "command": "pr-notes.showMenu",
         "title": "Show Recording Menu",
         "icon": "$(mic)"

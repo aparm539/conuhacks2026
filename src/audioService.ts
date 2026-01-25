@@ -3,7 +3,6 @@
  */
 import * as vscode from 'vscode';
 import * as fs from 'fs';
-import * as path from 'path';
 import { DiarizationApiClient } from './apiClient';
 import { DiarizationResponse } from './types';
 
@@ -14,85 +13,6 @@ export class AudioService {
     constructor(context: vscode.ExtensionContext, apiClient?: DiarizationApiClient) {
         this.context = context;
         this.apiClient = apiClient || new DiarizationApiClient();
-    }
-
-    /**
-     * Get the temporary directory for storing audio files
-     */
-    private getTempDir(): string {
-        const tempDir = path.join(this.context.globalStoragePath, 'audio-temp');
-        if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir, { recursive: true });
-        }
-        return tempDir;
-    }
-
-    /**
-     * Record audio from microphone
-     * 
-     * @deprecated This method is intentionally unimplemented. Audio recording is handled
-     * by the server process (src/server.ts) which uses node-audiorecorder and sox for
-     * system-level audio capture. The RecordingService manages the recording lifecycle
-     * through IPC communication with the server process.
-     * 
-     * This method exists only for backwards compatibility and will throw an error if called.
-     * Use RecordingService.startRecording() instead for live audio recording.
-     * 
-     * @throws Error Always throws an error indicating this method is not implemented
-     */
-    async recordAudio(durationSeconds: number = 30): Promise<string> {
-        throw new Error(
-            'Audio recording via AudioService.recordAudio() is not implemented. ' +
-            'Audio recording is handled by the server process (src/server.ts) via RecordingService. ' +
-            'Use RecordingService.startRecording() instead for live audio recording, or ' +
-            'use processAudioFromFile() to process an existing audio file.'
-        );
-    }
-
-    /**
-     * Process an audio file with speaker diarization
-     */
-    async processAudioFile(audioFilePath: string): Promise<DiarizationResponse> {
-        try {
-            // Check if file exists
-            if (!fs.existsSync(audioFilePath)) {
-                throw new Error(`Audio file not found: ${audioFilePath}`);
-            }
-
-            // Check file size (limit to 100MB)
-            const stats = fs.statSync(audioFilePath);
-            const maxSize = 100 * 1024 * 1024; // 100MB
-            if (stats.size > maxSize) {
-                throw new Error(`Audio file too large: ${(stats.size / 1024 / 1024).toFixed(2)}MB. Maximum size is 100MB.`);
-            }
-
-            // Show progress notification
-            const progressOptions: vscode.ProgressOptions = {
-                location: vscode.ProgressLocation.Notification,
-                title: 'Processing audio...',
-                cancellable: false,
-            };
-
-            return await vscode.window.withProgress(
-                progressOptions,
-                async (progress) => {
-                    progress.report({ increment: 0, message: 'Sending audio to diarization service...' });
-                    
-                    const result = await this.apiClient.processAudio(audioFilePath, (progressValue) => {
-                        progress.report({ increment: progressValue, message: 'Processing audio...' });
-                    });
-
-                    progress.report({ increment: 100, message: 'Complete!' });
-                    return result;
-                }
-            );
-        } catch (error) {
-            if (error instanceof Error) {
-                vscode.window.showErrorMessage(`Failed to process audio: ${error.message}`);
-                throw error;
-            }
-            throw error;
-        }
     }
 
     /**
@@ -117,10 +37,23 @@ export class AudioService {
             }
 
             const audioPath = audioFile[0].fsPath;
-            return await this.processAudioFile(audioPath);
+
+            // Validate file exists
+            if (!fs.existsSync(audioPath)) {
+                throw new Error(`Audio file not found: ${audioPath}`);
+            }
+
+            // Validate file size (limit to 100MB)
+            const stats = fs.statSync(audioPath);
+            const maxSize = 100 * 1024 * 1024; // 100MB
+            if (stats.size > maxSize) {
+                throw new Error(`Audio file too large: ${(stats.size / 1024 / 1024).toFixed(2)}MB. Maximum size is 100MB.`);
+            }
+
+            return await this.apiClient.processAudio(audioPath);
         } catch (error) {
             if (error instanceof Error) {
-                vscode.window.showErrorMessage(`Error selecting audio file: ${error.message}`);
+                vscode.window.showErrorMessage(`Failed to process audio: ${error.message}`);
             }
             return null;
         }
@@ -154,19 +87,4 @@ export class AudioService {
         return JSON.stringify(results, null, 2);
     }
 
-    /**
-     * Check if the API service is available
-     */
-    async checkServiceHealth(): Promise<boolean> {
-        try {
-            const health = await this.apiClient.checkHealth();
-            return health.pipeline_loaded;
-        } catch (error) {
-            vscode.window.showWarningMessage(
-                `Diarization service is not available: ${error instanceof Error ? error.message : 'Unknown error'}. ` +
-                `Make sure the Docker container is running on ${this.apiClient.getBaseUrl()}`
-            );
-            return false;
-        }
-    }
 }

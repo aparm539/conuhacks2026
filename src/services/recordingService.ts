@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import { ContextCollector, RecordingContext } from '../contextCollector';
-import { getSelectedDevice } from '../audioDeviceManager';
 import { ServerManager } from './serverManager';
 
 /**
@@ -33,15 +32,14 @@ export class RecordingService {
 			this.serverManager.start();
 		}
 		
-		const selectedDevice = getSelectedDevice();
-		
 		// Start context collection first, then send audio start command
 		// This ensures context timestamps align with audio recording start
 		this.contextCollector.startRecording();
 		
 		// Send start command immediately (removed artificial delay)
 		// The delay was causing context/audio timing misalignment
-		if (this.serverManager.send({ command: 'start', device: selectedDevice })) {
+		// Always use default device - no device parameter means system default
+		if (this.serverManager.send({ command: 'start' })) {
 			this.isRecording = true;
 		} else {
 			console.error('[RecordingService] Failed to send start command to server');

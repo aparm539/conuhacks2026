@@ -2,7 +2,7 @@
  * API client for communicating with the speaker diarization service
  */
 import * as vscode from 'vscode';
-import { DiarizationResponse, ErrorResponse, HealthResponse, ApiConfig } from './types';
+import { DiarizationResponse, ErrorResponse, ApiConfig } from './types';
 import { HttpClient } from './services/httpClient';
 
 export class DiarizationApiClient {
@@ -17,24 +17,13 @@ export class DiarizationApiClient {
         this.httpClient = new HttpClient(this.config.baseUrl, this.config.timeout);
     }
 
-    /**
-     * Check if the API service is healthy and ready
-     */
-    async checkHealth(): Promise<HealthResponse> {
-        return this.httpClient.get<HealthResponse>('/health', {
-            timeout: 5000,
-            errorContext: 'Health check'
-        });
-    }
 
     /**
      * Process an audio file for speaker diarization
      * @param audioFile Path to the audio file or File/Blob object
-     * @param onProgress Optional progress callback
      */
     async processAudio(
-        audioFile: string | File | Blob,
-        onProgress?: (progress: number) => void
+        audioFile: string | File | Blob
     ): Promise<DiarizationResponse> {
         // Prepare form data
         const formData = new FormData();

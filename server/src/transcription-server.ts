@@ -69,18 +69,6 @@ function initializeGeminiClient(): void {
 initializeSpeechClient();
 initializeGeminiClient();
 
-// Health check endpoint
-app.get('/health', (req: Request, res: Response) => {
-  console.log('[HEALTH] Health check requested');
-  res.json({ 
-    status: 'healthy', 
-    service: 'transcription-server',
-    timestamp: new Date().toISOString(),
-    speechClientInitialized: speechClient !== null,
-    geminiClientInitialized: geminiClient !== null
-  });
-});
-
 // Routes
 app.post('/transcribe', createTranscribeRoute(speechClient));
 app.post('/process-segments', createProcessSegmentsRoute(geminiClient));

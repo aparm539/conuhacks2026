@@ -58,7 +58,7 @@ export class ServerManager {
 	/**
 	 * Send a command to the server process
 	 */
-	send(command: { command: string; device?: string }): boolean {
+	send(command: { command: string }): boolean {
 		if (!this.serverProcess || !this.serverProcess.send) {
 			return false;
 		}

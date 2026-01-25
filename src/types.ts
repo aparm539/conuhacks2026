@@ -43,12 +43,6 @@ export interface ErrorResponse {
     message?: string;
 }
 
-export interface HealthResponse {
-    status: string;
-    service: string;
-    pipeline_loaded: boolean;
-}
-
 export interface ApiConfig {
     baseUrl: string;
     timeout?: number;
