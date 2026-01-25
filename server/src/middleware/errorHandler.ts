@@ -16,9 +16,10 @@ export function errorHandler(
 
   // Handle ApiError with custom status code
   if (error instanceof ApiError) {
-    return res.status(error.statusCode).json({
+    res.status(error.statusCode).json({
       error: error.message
     });
+    return;
   }
 
   // Default to 500 if status code not set

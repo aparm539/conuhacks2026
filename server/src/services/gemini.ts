@@ -231,10 +231,20 @@ Output (JSON only):
 Return ONLY the JSON array, no other text, no markdown, no explanations.`;
 
     // Call Gemini API
+    console.log(`[Unified Processing] Processing batch ${i / BATCH_SIZE_UNIFIED + 1}, segments ${i} to ${batchEnd - 1}`);
     const model = geminiClient.getGenerativeModel({ model: GEMINI_MODEL });
-    const result = await model.generateContent(prompt);
+    
+    let result;
+    try {
+      result = await model.generateContent(prompt);
+    } catch (apiError) {
+      console.error('[Unified Processing] Gemini API call failed:', apiError);
+      throw apiError;
+    }
+    
     const response = await result.response;
     const text = response.text();
+    console.log(`[Unified Processing] Received response (${text.length} chars)`);
 
     // Parse JSON response
     let processedResults: (TransformedSegment | TransformedSegment[] | null)[];
