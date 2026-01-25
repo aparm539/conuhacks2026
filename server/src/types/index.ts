@@ -51,6 +51,20 @@ export interface SplitResponse {
   splitSegments: ClassifiedSegment[];
 }
 
+// Combined process-segments endpoint (classify + split + transform in one request)
+export interface ProcessSegmentsRequest {
+  segments: SpeakerSegment[];
+}
+
+export interface ProcessSegmentsResponse {
+  transformedSegments: TransformedSegment[];
+}
+
+export interface ProcessSegmentsErrorResponse extends ProcessSegmentsResponse {
+  transformedSegments: [];
+  error: string;
+}
+
 export interface CandidateLocation {
   timestamp: number;
   file: string;

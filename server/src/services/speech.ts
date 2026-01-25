@@ -3,6 +3,7 @@ import { SpeechClient } from '@google-cloud/speech';
 import { formatDuration } from '../utils/duration';
 import { isWavFormat, validateAudioBuffer } from '../utils/audio';
 import { getDiarization, matchWordsToSpeakers } from './diarization';
+import type { DiarizationResponse } from '../types';
 import {
   DEFAULT_ENCODING,
   DEFAULT_SAMPLE_RATE,
@@ -11,6 +12,7 @@ import {
 
 /**
  * Process audio buffer with Google Cloud Speech API and return words with speaker tags
+ * Runs transcription and diarization in parallel for faster processing
  */
 export async function transcribeAudio(
   audioBuffer: Buffer,
@@ -39,6 +41,13 @@ export async function transcribeAudio(
     audio: audioConfig,
   };
 
+  // Start diarization in parallel with transcription for faster processing
+  console.log('[TRANSCRIBE] Starting transcription and diarization in parallel...');
+  const diarizationPromise = getDiarization(audioBuffer).catch(error => {
+    console.error('[TRANSCRIBE] Diarization failed (will fallback):', error);
+    return null;
+  });
+
   console.log('[TRANSCRIBE] Calling Google Cloud Speech API...');
   const [response] = await speechClient.recognize(request);
   console.log('[TRANSCRIBE] Google Cloud Speech API response received. Results count:', response.results?.length || 0);
@@ -64,7 +73,9 @@ export async function transcribeAudio(
       const [altResponse] = await speechClient.recognize(altRequest);
       if (altResponse.results && altResponse.results.length > 0) {
         console.log(`Success with LINEAR16/${sampleRate}Hz`);
-        return processSpeechResponse(altResponse, audioBuffer);
+        // Wait for diarization result that was started earlier
+        const diarizationResult = await diarizationPromise;
+        return processSpeechResponse(altResponse, diarizationResult);
       }
       } catch (altError) {
         console.log(`Failed with LINEAR16/${sampleRate}Hz:`, altError);
@@ -79,16 +90,19 @@ export async function transcribeAudio(
     );
   }
 
-  return processSpeechResponse(response, audioBuffer);
+  // Wait for diarization result that was started in parallel
+  const diarizationResult = await diarizationPromise;
+  return processSpeechResponse(response, diarizationResult);
 }
 
 /**
- * Process speech recognition response and add speaker tags via diarization
+ * Process speech recognition response and add speaker tags from pre-fetched diarization result
+ * Diarization is run in parallel with transcription for faster processing
  */
-async function processSpeechResponse(
+function processSpeechResponse(
   response: protos.google.cloud.speech.v1.IRecognizeResponse,
-  audioBuffer: Buffer
-): Promise<Array<{ word: string; speakerTag: number; startOffset: string; endOffset: string }>> {
+  diarizationResult: DiarizationResponse | null
+): Array<{ word: string; speakerTag: number; startOffset: string; endOffset: string }> {
   // Extract words from the last result (speaker tags only appear in the final result)
   if (!response.results || response.results.length === 0) {
     throw new Error('No results found in transcription response');
@@ -107,19 +121,16 @@ async function processSpeechResponse(
     endOffset: formatDuration(wordInfo.endTime),
   }));
 
-  // Get diarization from diar-service
+  // Use pre-fetched diarization result (already ran in parallel with transcription)
   let words: Array<{ word: string; speakerTag: number; startOffset: string; endOffset: string }>;
-  try {
-    console.log('Calling diar-service for speaker diarization...');
-    const diarizationResult = await getDiarization(audioBuffer);
-    console.log(`Diarization successful: ${diarizationResult.segments.length} segments, ${diarizationResult.total_speakers} speakers`);
-    
+  
+  if (diarizationResult) {
+    console.log(`[TRANSCRIBE] Using diarization result: ${diarizationResult.segments.length} segments, ${diarizationResult.total_speakers} speakers`);
     // Match words to speaker segments
     words = matchWordsToSpeakers(wordsWithoutSpeakers, diarizationResult.segments);
-  } catch (error) {
-    console.error('Diar-service error:', error);
+  } else {
     // Fallback: return words without speaker tags (default to 0)
-    console.warn('Falling back to words without speaker tags');
+    console.warn('[TRANSCRIBE] Falling back to words without speaker tags');
     words = wordsWithoutSpeakers.map(w => ({
       ...w,
       speakerTag: 0
@@ -128,7 +139,7 @@ async function processSpeechResponse(
 
   // Ensure words is always defined and is an array
   if (!words || !Array.isArray(words)) {
-    console.error('Words array is invalid, using fallback');
+    console.error('[TRANSCRIBE] Words array is invalid, using fallback');
     words = wordsWithoutSpeakers.map(w => ({
       ...w,
       speakerTag: 0

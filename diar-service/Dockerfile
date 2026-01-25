@@ -2,6 +2,9 @@
 # This works on both GPU and CPU-only systems
 FROM python:3.13-slim
 
+# HuggingFace token for downloading gated models during build
+ARG HF_TOKEN
+
 # Set working directory
 WORKDIR /app
 
@@ -31,6 +34,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PYANNOTE_CACHE=/app/.cache
 ENV PYTHONUNBUFFERED=1
 ENV GIT_TERMINAL_PROMPT=0
+# HuggingFace cache location for model storage
+ENV HF_HOME=/app/.cache/huggingface
+ENV HF_HUB_CACHE=/app/.cache/huggingface
 
 # Install uv package manager (recommended by pyannote-audio for better dependency resolution)
 RUN pip install --no-cache-dir uv
@@ -68,9 +74,18 @@ RUN uv pip install -r requirements.txt
 
 # Copy application code
 COPY app.py .
+COPY download_model.py .
 
 # Create cache directory
-RUN mkdir -p /app/.cache
+RUN mkdir -p /app/.cache /app/.cache/huggingface
+
+# Pre-download pyannote model during build for fast container startup
+# This bakes the model into the image, eliminating download time at runtime
+RUN if [ -n "$HF_TOKEN" ]; then \
+    /app/.venv/bin/python download_model.py "$HF_TOKEN"; \
+    else \
+    echo "WARNING: HF_TOKEN not provided, skipping model pre-download. Container startup will be slow."; \
+    fi
 
 # Expose port
 EXPOSE 8000

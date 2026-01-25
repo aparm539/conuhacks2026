@@ -19,6 +19,9 @@ services:
     build:
       context: ./diar-service
       dockerfile: Dockerfile
+      args:
+        # Pass HF_TOKEN to bake model into image during build
+        - HF_TOKEN=${HF_TOKEN}
     ports:
       - "8000:8000"
     volumes:
@@ -29,6 +32,10 @@ services:
     environment:
       - PYANNOTE_CACHE=/app/.cache
       - PYTHONUNBUFFERED=1
+      # HuggingFace cache location for baked-in model
+      - HF_HOME=/app/.cache/huggingface
+      # Skip HTTP auth check at startup - use pre-cached model for fast startup
+      - HF_HUB_OFFLINE=1
     restart: unless-stopped
 
 volumes:

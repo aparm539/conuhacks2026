@@ -8,6 +8,7 @@ import { createTranscribeRoute } from './routes/transcribe';
 import { createClassifyRoute } from './routes/classify';
 import { createTransformRoute } from './routes/transform';
 import { createSplitRoute } from './routes/split';
+import { createProcessSegmentsRoute } from './routes/processSegments';
 import { createLocationRoute, createBatchLocationRoute } from './routes/location';
 import { errorHandler } from './middleware/errorHandler';
 
@@ -85,6 +86,8 @@ app.post('/transcribe', createTranscribeRoute(speechClient));
 app.post('/classify', createClassifyRoute(geminiClient));
 app.post('/transform', createTransformRoute(geminiClient));
 app.post('/split', createSplitRoute(geminiClient));
+// Combined endpoint for classify + split + transform (reduces HTTP round-trips)
+app.post('/process-segments', createProcessSegmentsRoute(geminiClient));
 app.post('/select-comment-location', createLocationRoute(geminiClient));
 app.post('/select-comment-locations', createBatchLocationRoute(geminiClient));
 

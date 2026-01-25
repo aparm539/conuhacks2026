@@ -2,11 +2,16 @@
 FastAPI service for speaker diarization using pyannote-audio.
 Receives audio files from VS Code extension and returns speaker segments.
 """
+import os
+# Ensure HuggingFace uses the baked-in model cache from Docker image
+# This must be set before importing pyannote.audio or huggingface_hub
+os.environ.setdefault("HF_HOME", "/app/.cache/huggingface")
+os.environ.setdefault("HF_HUB_CACHE", "/app/.cache/huggingface")
+
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
-import os
 import tempfile
 import logging
 

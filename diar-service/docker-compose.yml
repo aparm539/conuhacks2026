@@ -3,6 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Pass HF_TOKEN to bake model into image during build
+        - HF_TOKEN=${HF_TOKEN}
     container_name: pyannote-audio-service
     ports:
       - "8000:8000"
@@ -21,6 +24,10 @@ services:
       # PYANNOTE_CACHE and PYTHONUNBUFFERED are set here explicitly
       - PYANNOTE_CACHE=/app/.cache
       - PYTHONUNBUFFERED=1
+      # HuggingFace cache location for baked-in model
+      - HF_HOME=/app/.cache/huggingface
+      # Skip HTTP auth check at startup - use pre-cached model for fast startup
+      - HF_HUB_OFFLINE=1
     # Uncomment the following lines if you have GPU support
     # deploy:
     #   resources:

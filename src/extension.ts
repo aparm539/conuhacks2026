@@ -306,6 +306,42 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	}
 
+	/**
+	 * Combined endpoint: classify, split, and transform segments in a single request
+	 * Reduces HTTP round-trips from 3 to 1 for faster processing
+	 */
+	async function processSegments(segments: SpeakerSegment[]): Promise<TransformedSegment[]> {
+		try {
+			const response = await fetch(`${TRANSCRIPTION_SERVER_URL}/process-segments`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({
+					segments: segments,
+				}),
+			});
+
+			if (!response.ok) {
+				const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
+				throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+			}
+
+			const data = await response.json() as { transformedSegments?: TransformedSegment[] };
+			
+			if (!data.transformedSegments || !Array.isArray(data.transformedSegments)) {
+				throw new Error('No transformedSegments array in response');
+			}
+
+			return data.transformedSegments;
+		} catch (error) {
+			if (error instanceof TypeError && error.message.includes('fetch')) {
+				throw new Error('Failed to connect to transcription server. Make sure the Docker container is running on port 3000.');
+			}
+			throw error;
+		}
+	}
+
 	function startServer() {
 		if (serverProcess) {
 			return;
@@ -430,38 +466,12 @@ export function activate(context: vscode.ExtensionContext) {
 							return;
 						}
 						
-						// Classify segments
-						progress.report({ increment: 20, message: `Classifying ${segments.length} segments...` });
-						let classifiedSegments: ClassifiedSegment[];
-						try {
-							classifiedSegments = await classifySegments(segments);
-							console.log(`[EXTENSION] Classified ${segments.length} segments into ${classifiedSegments.length} classified segments`);
-						} catch (error) {
-							console.error('Classification failed:', error);
-							const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-							vscode.window.showErrorMessage(`Failed to classify speech segments: ${errorMessage}`);
-							return;
-						}
-						
-						// Split segments based on topic and context
-						progress.report({ increment: 20, message: `Splitting ${classifiedSegments.length} segments...` });
-						let splitClassifiedSegments: ClassifiedSegment[];
-						try {
-							splitClassifiedSegments = await splitSegments(classifiedSegments);
-							console.log(`[EXTENSION] Split ${classifiedSegments.length} segments into ${splitClassifiedSegments.length} split segments`);
-						} catch (error) {
-							console.error('Splitting failed:', error);
-							const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-							vscode.window.showErrorMessage(`Failed to split speech segments: ${errorMessage}`);
-							return;
-						}
-						
-						// Transform segments
-						progress.report({ increment: 20, message: `Transforming ${splitClassifiedSegments.length} segments...` });
+						// Process segments (classify, split, transform) in a single request
+						progress.report({ increment: 60, message: `Processing ${segments.length} segments...` });
 						let transformedSegments: TransformedSegment[];
 						try {
-							transformedSegments = await transformSegments(splitClassifiedSegments);
-							console.log(`[EXTENSION] Transformed ${splitClassifiedSegments.length} segments into ${transformedSegments.length} transformed segments`);
+							transformedSegments = await processSegments(segments);
+							console.log(`[EXTENSION] Processed ${segments.length} segments into ${transformedSegments.length} transformed segments`);
 							
 							// Log classification breakdown
 							const classificationCounts = transformedSegments.reduce((acc, seg) => {
@@ -470,9 +480,9 @@ export function activate(context: vscode.ExtensionContext) {
 							}, {} as Record<string, number>);
 							console.log(`[EXTENSION] Classification breakdown:`, classificationCounts);
 						} catch (error) {
-							console.error('Transformation failed:', error);
+							console.error('Processing failed:', error);
 							const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-							vscode.window.showErrorMessage(`Failed to transform speech segments: ${errorMessage}`);
+							vscode.window.showErrorMessage(`Failed to process speech segments: ${errorMessage}`);
 							return;
 						}
 						

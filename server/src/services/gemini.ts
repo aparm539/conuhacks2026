@@ -88,7 +88,8 @@ Classifications:`;
 }
 
 /**
- * Classify segments sequentially in batches with context
+ * Classify segments in parallel batches with context
+ * Processes all batches concurrently for faster classification
  */
 export async function classifySegmentsSequentially(
   segments: SpeakerSegment[],
@@ -98,20 +99,34 @@ export async function classifySegmentsSequentially(
     return [];
   }
 
-  const results: ClassifiedSegment[] = [];
+  // Prepare all batches with their contexts
+  const batchPromises: Promise<{ batchIndex: number; batch: SpeakerSegment[]; classifications: SegmentClassification[] }>[] = [];
 
   for (let i = 0; i < segments.length; i += BATCH_SIZE_CLASSIFY) {
     const batchEnd = Math.min(i + BATCH_SIZE_CLASSIFY, segments.length);
     const batch = segments.slice(i, batchEnd);
+    const batchIndex = i;
 
     // Get context segments
     const contextBefore = segments.slice(Math.max(0, i - CONTEXT_SIZE), i);
     const contextAfter = segments.slice(batchEnd, Math.min(segments.length, batchEnd + CONTEXT_SIZE));
 
-    // Classify batch
-    const classifications = await classifySegmentsBatch(batch, contextBefore, contextAfter, geminiClient);
+    // Create promise for this batch (runs in parallel)
+    const batchPromise = classifySegmentsBatch(batch, contextBefore, contextAfter, geminiClient)
+      .then(classifications => ({ batchIndex, batch, classifications }));
+    
+    batchPromises.push(batchPromise);
+  }
 
-    // Combine segments with classifications
+  // Wait for all batches to complete in parallel
+  console.log(`[Classify] Processing ${batchPromises.length} batch(es) in parallel...`);
+  const batchResults = await Promise.all(batchPromises);
+
+  // Sort by batch index to maintain order, then combine results
+  batchResults.sort((a, b) => a.batchIndex - b.batchIndex);
+  
+  const results: ClassifiedSegment[] = [];
+  for (const { batch, classifications } of batchResults) {
     for (let j = 0; j < batch.length; j++) {
       results.push({
         ...batch[j],
@@ -211,8 +226,9 @@ Transformed comments:`;
 }
 
 /**
- * Transform classified segments sequentially in batches with context
+ * Transform classified segments in parallel batches with context
  * Filters out Ignore segments and only transforms non-Ignore segments
+ * Processes all batches concurrently for faster transformation
  */
 export async function transformSegmentsSequentially(
   classifiedSegments: ClassifiedSegment[],
@@ -226,17 +242,19 @@ export async function transformSegmentsSequentially(
     return [];
   }
 
-  const results: TransformedSegment[] = [];
-
   // Create a map to track original indices for context lookup
   const originalIndices = new Map<ClassifiedSegment, number>();
   classifiedSegments.forEach((seg, idx) => {
     originalIndices.set(seg, idx);
   });
 
+  // Prepare all batches with their contexts
+  const batchPromises: Promise<{ batchIndex: number; batch: ClassifiedSegment[]; transformedTexts: string[] }>[] = [];
+
   for (let i = 0; i < segmentsToTransform.length; i += BATCH_SIZE_TRANSFORM) {
     const batchEnd = Math.min(i + BATCH_SIZE_TRANSFORM, segmentsToTransform.length);
     const batch = segmentsToTransform.slice(i, batchEnd);
+    const batchIndex = i;
 
     // Get context segments from the original array (including Ignore segments for context)
     const batchStartOriginalIdx = originalIndices.get(batch[0])!;
@@ -251,10 +269,22 @@ export async function transformSegmentsSequentially(
       Math.min(classifiedSegments.length, batchEndOriginalIdx + 1 + CONTEXT_SIZE)
     );
 
-    // Transform batch
-    const transformedTexts = await transformSegmentsBatch(batch, contextBefore, contextAfter, geminiClient);
+    // Create promise for this batch (runs in parallel)
+    const batchPromise = transformSegmentsBatch(batch, contextBefore, contextAfter, geminiClient)
+      .then(transformedTexts => ({ batchIndex, batch, transformedTexts }));
+    
+    batchPromises.push(batchPromise);
+  }
 
-    // Combine segments with transformed text
+  // Wait for all batches to complete in parallel
+  console.log(`[Transform] Processing ${batchPromises.length} batch(es) in parallel...`);
+  const batchResults = await Promise.all(batchPromises);
+
+  // Sort by batch index to maintain order, then combine results
+  batchResults.sort((a, b) => a.batchIndex - b.batchIndex);
+  
+  const results: TransformedSegment[] = [];
+  for (const { batch, transformedTexts } of batchResults) {
     for (let j = 0; j < batch.length; j++) {
       results.push({
         ...batch[j],
@@ -392,8 +422,9 @@ Now return the JSON array for the segments above:`;
 }
 
 /**
- * Split segments sequentially in batches with context
+ * Split segments in parallel batches with context
  * Splits long segments into multiple segments when appropriate
+ * Processes all batches concurrently for faster splitting
  */
 export async function splitSegmentsSequentially(
   classifiedSegments: ClassifiedSegment[],
@@ -403,22 +434,39 @@ export async function splitSegmentsSequentially(
     return [];
   }
 
-  const results: ClassifiedSegment[] = [];
-  let totalDuplicatesFiltered = 0;
+  // Prepare all batches with their contexts
+  const batchPromises: Promise<{ batchIndex: number; batch: ClassifiedSegment[]; splitDecisions: (string | string[])[] }>[] = [];
 
   for (let i = 0; i < classifiedSegments.length; i += BATCH_SIZE_SPLIT) {
     const batchEnd = Math.min(i + BATCH_SIZE_SPLIT, classifiedSegments.length);
     const batch = classifiedSegments.slice(i, batchEnd);
+    const batchIndex = i;
 
     // Get context segments
     const contextBefore = classifiedSegments.slice(Math.max(0, i - CONTEXT_SIZE), i);
     const contextAfter = classifiedSegments.slice(batchEnd, Math.min(classifiedSegments.length, batchEnd + CONTEXT_SIZE));
 
-    // Get split decisions
-    const splitDecisions = await splitSegmentsBatch(batch, contextBefore, contextAfter, geminiClient);
+    // Create promise for this batch (runs in parallel)
+    const batchPromise = splitSegmentsBatch(batch, contextBefore, contextAfter, geminiClient)
+      .then(splitDecisions => ({ batchIndex, batch, splitDecisions }));
+    
+    batchPromises.push(batchPromise);
+  }
 
-    // Process each segment based on split decision
+  // Wait for all batches to complete in parallel
+  console.log(`[Split] Processing ${batchPromises.length} batch(es) in parallel...`);
+  const batchResults = await Promise.all(batchPromises);
+
+  // Sort by batch index to maintain order
+  batchResults.sort((a, b) => a.batchIndex - b.batchIndex);
+
+  // Process results
+  const results: ClassifiedSegment[] = [];
+  let totalDuplicatesFiltered = 0;
+
+  for (const { batch, splitDecisions } of batchResults) {
     let batchDuplicatesFiltered = 0;
+    
     for (let j = 0; j < batch.length; j++) {
       const segment = batch[j];
       const decision = splitDecisions[j];
