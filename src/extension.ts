@@ -16,7 +16,7 @@ import type { SpeakerSegment, TransformedSegment } from './types';
 import { getPrContext } from './gitHubPrContext';
 import { postReviewComments, type ReviewCommentInput } from './githubPrComments';
 import { getRepositoryRelativePath } from './utils/filePath';
-import { processSegmentsCombined } from './services/gemini';
+import { processSegmentsCombined, initializeGeminiService, resetGeminiClient } from './services/gemini';
 
 let audioService: AudioService;
 
@@ -27,6 +27,12 @@ export function activate(context: vscode.ExtensionContext) {
 	// Use the console to output diagnostic information (console.log) and errors (console.error)
 	// This line of code will only be executed once when your extension is activated
 	console.log('PR Notes extension is now active!');
+
+	// Initialize Gemini service with secret storage access
+	const GEMINI_API_KEY_SECRET = 'pr-notes.geminiApiKey';
+	initializeGeminiService(async () => {
+		return await context.secrets.get(GEMINI_API_KEY_SECRET);
+	});
 
 	// Initialize audio service for diarisation
 	const apiClient = new DiarizationApiClient();
@@ -630,13 +636,12 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	});
 
-	// Set Gemini API key command - prompts user to enter their API key
+	// Set Gemini API key command - prompts user to enter their API key (stored securely)
 	const setGeminiApiKeyDisposable = vscode.commands.registerCommand('pr-notes.setGeminiApiKey', async () => {
-		const config = vscode.workspace.getConfiguration('pr-notes');
-		const currentKey = config.get<string>('geminiApiKey') || '';
+		const currentKey = await context.secrets.get(GEMINI_API_KEY_SECRET);
 		
 		const apiKey = await vscode.window.showInputBox({
-			prompt: 'Enter your Gemini API key',
+			prompt: 'Enter your Gemini API key (get one at https://aistudio.google.com/app/apikey)',
 			placeHolder: 'AIza...',
 			value: currentKey ? '••••••••' + currentKey.slice(-4) : '',
 			password: true,
@@ -654,8 +659,10 @@ export function activate(context: vscode.ExtensionContext) {
 
 		if (apiKey && !apiKey.startsWith('••••')) {
 			try {
-				await config.update('geminiApiKey', apiKey.trim(), vscode.ConfigurationTarget.Global);
-				vscode.window.showInformationMessage('Gemini API key saved successfully!');
+				await context.secrets.store(GEMINI_API_KEY_SECRET, apiKey.trim());
+				// Reset the Gemini client so it picks up the new key
+				resetGeminiClient();
+				vscode.window.showInformationMessage('Gemini API key saved securely!');
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 				vscode.window.showErrorMessage(`Failed to save API key: ${errorMessage}`);

@@ -95,11 +95,6 @@
           "type": "number",
           "default": 0,
           "description": "Override PR number. When set with owner and repo, used instead of resolving PR from current branch."
-        },
-        "pr-notes.geminiApiKey": {
-          "type": "string",
-          "default": "",
-          "description": "Gemini API key for processing speech segments. Get one at https://aistudio.google.com/app/apikey"
         }
       }
     }

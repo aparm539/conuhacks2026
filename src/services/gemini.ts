@@ -4,7 +4,6 @@
  */
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import * as vscode from 'vscode';
 import type {
     SpeakerSegment,
     ClassifiedSegment,
@@ -25,24 +24,57 @@ const GEMINI_MODEL = 'gemini-2.0-flash';
 
 // Gemini client (lazily initialized)
 let geminiClient: GoogleGenerativeAI | null = null;
+let cachedApiKey: string | null = null;
+
+// Function to get API key from secret storage (set by extension)
+let getApiKeyFromSecrets: (() => Promise<string | undefined>) | null = null;
+
+/**
+ * Initialize the Gemini service with a function to retrieve the API key from secrets
+ * This must be called during extension activation
+ */
+export function initializeGeminiService(getApiKey: () => Promise<string | undefined>): void {
+    getApiKeyFromSecrets = getApiKey;
+    // Reset cached client when re-initializing
+    geminiClient = null;
+    cachedApiKey = null;
+}
+
+/**
+ * Reset the Gemini client (call after API key changes)
+ */
+export function resetGeminiClient(): void {
+    geminiClient = null;
+    cachedApiKey = null;
+}
 
 /**
  * Get or create the Gemini client
  */
-function getGeminiClient(): GoogleGenerativeAI {
+async function getGeminiClientAsync(): Promise<GoogleGenerativeAI> {
+    // Check if we need to refresh the client (API key changed)
+    let apiKey: string | undefined;
+    
+    if (getApiKeyFromSecrets) {
+        apiKey = await getApiKeyFromSecrets();
+    }
+
+    // If API key changed, reset the client
+    if (apiKey && apiKey !== cachedApiKey) {
+        geminiClient = null;
+        cachedApiKey = apiKey;
+    }
+
     if (geminiClient) {
         return geminiClient;
     }
 
-    // Try to get API key from VS Code settings first, then environment
-    const config = vscode.workspace.getConfiguration('pr-notes');
-    let apiKey = config.get<string>('geminiApiKey') || process.env.GEMINI_API_KEY || '';
-
     if (!apiKey) {
-        throw new Error('Gemini API key not configured. Set it in VS Code settings (pr-notes.geminiApiKey) or GEMINI_API_KEY environment variable.');
+        throw new Error('Gemini API key not configured. Use the "PR Notes: Set Gemini API Key" command to set your API key.');
     }
 
     geminiClient = new GoogleGenerativeAI(apiKey);
+    cachedApiKey = apiKey;
     return geminiClient;
 }
 
@@ -54,7 +86,7 @@ async function classifySegmentsBatch(
     contextBefore: SpeakerSegment[],
     contextAfter: SpeakerSegment[]
 ): Promise<SegmentClassification[]> {
-    const client = getGeminiClient();
+    const client = await getGeminiClientAsync();
     
     // Combine context and segments
     const allSegments = [...contextBefore, ...segments, ...contextAfter];
@@ -170,7 +202,7 @@ async function transformSegmentsBatch(
     contextBefore: ClassifiedSegment[],
     contextAfter: ClassifiedSegment[]
 ): Promise<string[]> {
-    const client = getGeminiClient();
+    const client = await getGeminiClientAsync();
 
     const allSegments = [...contextBefore, ...segments, ...contextAfter];
     const segmentStartIndex = contextBefore.length;
@@ -306,7 +338,7 @@ async function splitSegmentsBatch(
     contextBefore: ClassifiedSegment[],
     contextAfter: ClassifiedSegment[]
 ): Promise<(string | string[])[]> {
-    const client = getGeminiClient();
+    const client = await getGeminiClientAsync();
 
     const allSegments = [...contextBefore, ...segments, ...contextAfter];
     const segmentStartIndex = contextBefore.length;
@@ -462,7 +494,7 @@ export async function processSegmentsCombined(
         return [];
     }
 
-    const client = getGeminiClient();
+    const client = await getGeminiClientAsync();
 
     console.log(`[ProcessCombined] Processing ${segments.length} segment(s) in single API call...`);
 
@@ -603,7 +635,7 @@ export async function selectCommentLocationsBatch(
         throw new Error(`Mismatch: ${segments.length} segments but ${allCandidates.length} candidate arrays`);
     }
 
-    const client = getGeminiClient();
+    const client = await getGeminiClientAsync();
 
     const segmentDescriptions = segments.map((segment, idx) => {
         const candidates = allCandidates[idx];
