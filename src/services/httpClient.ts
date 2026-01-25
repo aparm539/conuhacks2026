@@ -98,7 +98,7 @@ export class HttpClient {
 				}
 
 				if (!response.ok) {
-					const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
+					const errorData = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string; message?: string };
 					const errorContext = options?.errorContext || 'Request';
 					throw new Error(errorData.error || errorData.message || `${errorContext} failed: HTTP ${response.status}`);
 				}
