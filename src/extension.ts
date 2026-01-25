@@ -13,6 +13,7 @@ import { ContextCollector, RecordingContext } from './contextCollector';
 import { WordInfo, SpeakerSegment, ClassifiedSegment, TransformedSegment, groupWordsBySpeaker, findCommentLocation, findCommentLocationsBatch } from './speechAlignment';
 import { getPrContext } from './gitHubPrContext';
 import { postReviewComments, type ReviewCommentInput } from './githubPrComments';
+import { getRepositoryRelativePath } from './utils/filePath';
 
 const TRANSCRIPTION_SERVER_URL = 'http://localhost:3000';
 
@@ -84,13 +85,8 @@ export function activate(context: vscode.ExtensionContext) {
 
 		const document = editor.document;
 		
-		// Get current file path for context matching
-		let currentFile: string | undefined;
-		if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
-			currentFile = vscode.workspace.asRelativePath(document.uri, false);
-		} else {
-			currentFile = document.uri.fsPath;
-		}
+		// Get current file path for context matching (handles git: URIs from diff view)
+		const currentFile = getRepositoryRelativePath(document.uri);
 
 		// Filter out Ignore segments (safety check - server already filters them)
 		const segmentsToComment = transformedSegments.filter(seg => seg.classification !== 'Ignore');
@@ -153,6 +149,15 @@ export function activate(context: vscode.ExtensionContext) {
 		const session = await getSession(false);
 		if (!session) {
 			vscode.window.showInformationMessage(`${localMsg} Sign in and use a PR branch to post to GitHub.`);
+			return;
+		}
+
+		// Check if file path was successfully extracted (required for GitHub API)
+		if (!currentFile) {
+			vscode.window.showWarningMessage(
+				`Could not determine file path from diff view. Comments created locally but not posted to GitHub.`
+			);
+			vscode.window.showInformationMessage(localMsg);
 			return;
 		}
 
