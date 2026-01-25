@@ -119,7 +119,7 @@ export function activate(context: vscode.ExtensionContext) {
 			const range = ranges[i];
 
 			// Format comment text with speaker label using transformed text
-			const commentText = `**Speaker ${segment.speakerTag}:** ${segment.transformedText}`;
+			const commentText = `${segment.transformedText}`;
 
 			// Create comment
 			const comment: vscode.Comment = {
