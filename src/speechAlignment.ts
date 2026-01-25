@@ -372,7 +372,7 @@ export async function findCommentLocationsBatch(
 
 		return ranges;
 	} catch (error) {
-		console.warn('Failed to use batch API for location selection, falling back to individual calls:', error);
+		console.warn('Failed to select comment locations:', error);
 		return []
 	}
 }

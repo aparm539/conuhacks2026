@@ -5,10 +5,7 @@ import { SpeechClient } from '@google-cloud/speech';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { MAX_REQUEST_BODY_SIZE } from './config/constants';
 import { createTranscribeRoute } from './routes/transcribe';
-import { createClassifyRoute } from './routes/classify';
-import { createTransformRoute } from './routes/transform';
-import { createSplitRoute } from './routes/split';
-import { createLocationRoute, createBatchLocationRoute } from './routes/location';
+import { createBatchLocationRoute } from './routes/location';
 import { createProcessSegmentsRoute } from './routes/processSegments';
 import { errorHandler } from './middleware/errorHandler';
 
@@ -72,11 +69,6 @@ initializeGeminiClient();
 // Routes
 app.post('/transcribe', createTranscribeRoute(speechClient));
 app.post('/process-segments', createProcessSegmentsRoute(geminiClient));
-// Legacy endpoints (kept for backwards compatibility and testing)
-app.post('/classify', createClassifyRoute(geminiClient));
-app.post('/transform', createTransformRoute(geminiClient));
-app.post('/split', createSplitRoute(geminiClient));
-app.post('/select-comment-location', createLocationRoute(geminiClient));
 app.post('/select-comment-locations', createBatchLocationRoute(geminiClient));
 
 // Error handling middleware (must be last)

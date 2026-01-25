@@ -27,30 +27,6 @@ export interface TransformedSegment extends ClassifiedSegment {
   transformedText: string;
 }
 
-export interface ClassificationRequest {
-  segments: SpeakerSegment[];
-}
-
-export interface ClassificationResponse {
-  classifiedSegments: ClassifiedSegment[];
-}
-
-export interface TransformationRequest {
-  classifiedSegments: ClassifiedSegment[];
-}
-
-export interface TransformationResponse {
-  transformedSegments: TransformedSegment[];
-}
-
-export interface SplitRequest {
-  classifiedSegments: ClassifiedSegment[];
-}
-
-export interface SplitResponse {
-  splitSegments: ClassifiedSegment[];
-}
-
 export interface CandidateLocation {
   timestamp: number;
   file: string;
@@ -58,18 +34,6 @@ export interface CandidateLocation {
   visibleRange: [number, number];
   symbolsInView: string[];
   codeContext: string;
-}
-
-export interface LocationSelectionRequest {
-  commentText: string;
-  classification: SegmentClassification;
-  candidates: CandidateLocation[];
-  fileName: string;
-}
-
-export interface LocationSelectionResponse {
-  selectedIndex: number;
-  rationale?: string;
 }
 
 export interface BatchLocationSelectionRequest {
@@ -91,22 +55,6 @@ export interface BatchLocationSelectionResponse {
 
 // Error response types - using generics to reduce duplication
 type WithError<T> = T & { error: string };
-
-export interface ClassificationErrorResponse extends WithError<ClassificationResponse> {
-  classifiedSegments: [];
-}
-
-export interface TransformationErrorResponse extends WithError<TransformationResponse> {
-  transformedSegments: [];
-}
-
-export interface SplitErrorResponse extends WithError<SplitResponse> {
-  splitSegments: [];
-}
-
-export interface LocationSelectionErrorResponse extends WithError<LocationSelectionResponse> {
-  selectedIndex: 0;
-}
 
 export interface BatchLocationSelectionErrorResponse extends WithError<BatchLocationSelectionResponse> {
   locations: [];

@@ -3,9 +3,6 @@
  */
 
 // Batch processing constants
-export const BATCH_SIZE_CLASSIFY = 7; // Process 5-10 segments per batch, using 7 as middle ground
-export const BATCH_SIZE_TRANSFORM = 7; // Process 5-10 segments per batch, using 7 as middle ground
-export const BATCH_SIZE_SPLIT = 5; // Process fewer segments at a time for splitting analysis
 export const CONTEXT_SIZE = 2; // Include 1-2 segments before/after for context
 
 // Audio processing constants

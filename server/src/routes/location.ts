@@ -1,73 +1,14 @@
 import type { Request, Response } from 'express';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { selectCommentLocation, selectCommentLocationsBatch } from '../services/gemini';
+import { selectCommentLocationsBatch } from '../services/gemini';
 import type { 
-  LocationSelectionRequest, 
-  LocationSelectionResponse, 
-  LocationSelectionErrorResponse,
   BatchLocationSelectionRequest,
   BatchLocationSelectionResponse,
   BatchLocationSelectionErrorResponse,
-  SegmentClassification 
 } from '../types/index';
 import { VALID_CLASSIFICATIONS } from '../types';
 import { asyncHandler } from '../middleware/errorHandler';
 import { requireGeminiClient, validateArray, validateCandidateLocations } from '../middleware/validation';
-
-export function createLocationRoute(geminiClient: GoogleGenerativeAI | null) {
-  return asyncHandler(async (
-    req: Request<{}, LocationSelectionResponse, LocationSelectionRequest>,
-    res: Response<LocationSelectionResponse | LocationSelectionErrorResponse>
-  ) => {
-    const client = requireGeminiClient(geminiClient);
-    const { commentText, classification, candidates, fileName } = req.body;
-
-    if (!commentText || typeof commentText !== 'string') {
-      console.error('[API] ERROR: Missing or invalid commentText');
-      return res.status(400).json({ 
-        selectedIndex: 0,
-        error: 'Missing or invalid commentText. Expected string.' 
-      } as LocationSelectionErrorResponse);
-    }
-
-    if (!classification || !VALID_CLASSIFICATIONS.includes(classification)) {
-      console.error(`[API] ERROR: Missing or invalid classification: ${classification}`);
-      return res.status(400).json({ 
-        selectedIndex: 0,
-        error: 'Missing or invalid classification. Expected one of: Ignore, Question, Concern, Suggestion, Style.' 
-      } as LocationSelectionErrorResponse);
-    }
-
-    const validatedCandidates = validateArray<unknown>(candidates, 'candidates');
-    if (validatedCandidates.length === 0) {
-      console.error(`[API] ERROR: Empty candidates array`);
-      return res.status(400).json({ 
-        selectedIndex: 0,
-        error: 'Missing or invalid candidates. Expected non-empty array of CandidateLocation.' 
-      } as LocationSelectionErrorResponse);
-    }
-
-    // Validate candidate structure
-    try {
-      validateCandidateLocations(validatedCandidates);
-    } catch (error) {
-      console.error('[API] ERROR: Invalid candidate structure', error);
-      return res.status(400).json({ 
-        selectedIndex: 0,
-        error: error instanceof Error ? error.message : 'Invalid candidate structure' 
-      } as LocationSelectionErrorResponse);
-    }
-
-    const selection = await selectCommentLocation(
-      commentText,
-      classification as SegmentClassification,
-      validatedCandidates as any,
-      fileName || '',
-      client
-    );
-    res.json(selection);
-  });
-}
 
 export function createBatchLocationRoute(geminiClient: GoogleGenerativeAI | null) {
   return asyncHandler(async (
