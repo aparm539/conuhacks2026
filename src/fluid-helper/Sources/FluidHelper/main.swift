@@ -24,6 +24,21 @@ func processLine(_ line: String, processor: AudioProcessor) async {
             
         case .end:
             await processor.finalize()
+            
+        case .startRecording(let deviceId):
+            do {
+                try await processor.startRecording(deviceId: deviceId)
+            } catch {
+                emitError("Failed to start recording: \(error.localizedDescription)")
+            }
+            
+        case .stopRecording:
+            await processor.stopRecording()
+            
+        case .listDevices:
+            let devices = AudioRecorder.listInputDevices()
+            let deviceInfos = devices.map { DevicesMessage.DeviceInfo(id: $0.id, name: $0.name) }
+            emit(DevicesMessage(devices: deviceInfos))
         }
     } catch {
         emitError("Failed to parse input: \(error.localizedDescription)")

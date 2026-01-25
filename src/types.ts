@@ -1,8 +1,6 @@
 /**
  * TypeScript type definitions for the PR Notes extension
  */
-
-// Legacy diarization types (kept for compatibility)
 export interface DiarizationSpeakerSegment {
     speaker: string;
     start: number;

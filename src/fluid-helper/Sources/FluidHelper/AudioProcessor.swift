@@ -16,6 +16,28 @@ actor AudioProcessor {
     private var sampleBuffer: [Float] = []
     private let sampleRate: Float = 16000.0
     
+    // Recording state
+    private var recorder: AudioRecorder?
+    private var currentStreamText = ""
+    private var lastEmittedEnd: Double = 0
+    private var segmentCount = 0
+    private var recordingStartTime: Date?
+    
+    // Streaming ASR buffer - need enough samples for meaningful transcription
+    private var streamingAsrBuffer: [Float] = []
+    private let minAsrSamples: Int = 8000  // 0.5 seconds at 16kHz
+    private var lastAsrTime: Double = 0
+    private let asrInterval: Double = 0.5  // Run ASR every 0.5 seconds
+    
+    // Pause detection settings
+    private let silenceThreshold: Float = 0.01  // RMS below this = silence
+    private let pauseDuration: Double = 0.4     // 400ms pause = segment boundary
+    private var silenceStartTime: Double?
+    private var lastSpeechTime: Double = 0
+    
+    // Track last known speaker from diarization
+    private var currentSpeakerId: Int = 0
+    
     /// Initialize FluidAudio models
     func initialize() async throws {
         guard !isInitialized else { return }
@@ -88,7 +110,7 @@ actor AudioProcessor {
     /// Finalize processing and return all segments
     func finalize() async {
         guard isInitialized, !sampleBuffer.isEmpty else {
-            emit(DoneMessage(totalSpeakers: 0, segments: []))
+            emit(DoneMessage(totalSpeakers: 0, totalSegments: 0, totalDuration: 0))
             return
         }
         
@@ -105,21 +127,179 @@ actor AudioProcessor {
             emitError("ASR transcription failed: \(error.localizedDescription)")
         }
         
-        // Emit done message with all collected segments
-        let segmentData = collectedSegments.map { seg in
-            DoneMessage.SegmentData(
-                speakerId: seg.speakerId,
-                text: seg.text,
-                start: seg.start,
-                end: seg.end
-            )
-        }
-        
-        emit(DoneMessage(totalSpeakers: totalSpeakers, segments: segmentData))
+        // Emit done message
+        let totalDuration = Double(sampleBuffer.count) / Double(sampleRate)
+        emit(DoneMessage(totalSpeakers: totalSpeakers, totalSegments: collectedSegments.count, totalDuration: totalDuration))
         
         // Reset state
         sampleBuffer.removeAll()
         collectedSegments.removeAll()
+    }
+    
+    // MARK: - Real-Time Recording
+    
+    /// Start recording and streaming audio processing
+    func startRecording(deviceId: String? = nil) async throws {
+        // Ensure models are initialized first
+        if !isInitialized {
+            try await initialize()
+        }
+        
+        // Reset state for new recording
+        sampleBuffer.removeAll()
+        streamingAsrBuffer.removeAll()
+        collectedSegments.removeAll()
+        totalSpeakers = 0
+        currentStreamText = ""
+        lastEmittedEnd = 0
+        segmentCount = 0
+        recordingStartTime = Date()
+        silenceStartTime = nil
+        lastSpeechTime = 0
+        lastAsrTime = 0
+        currentSpeakerId = 0
+        
+        if recorder == nil {
+            recorder = AudioRecorder()
+        }
+        
+        // Start recording with streaming callback
+        try recorder?.startRecording(deviceId: deviceId) { [weak self] samples in
+            guard let self = self else { return }
+            Task {
+                await self.processStreamingChunk(samples)
+            }
+        }
+    }
+    
+    /// Stop recording - segments already emitted, just send summary
+    func stopRecording() async {
+        recorder?.stopRecording()
+        
+        // Emit any remaining pending text as final segment
+        if !currentStreamText.trimmingCharacters(in: .whitespaces).isEmpty {
+            let endTime = Date().timeIntervalSince(recordingStartTime ?? Date())
+            emit(SegmentMessage(
+                speakerId: currentSpeakerId,
+                text: currentStreamText.trimmingCharacters(in: .whitespaces),
+                start: lastEmittedEnd,
+                end: endTime,
+                isFinal: true
+            ))
+            segmentCount += 1
+        }
+        
+        // All segments already sent - just emit summary
+        let totalDuration = Date().timeIntervalSince(recordingStartTime ?? Date())
+        emit(DoneMessage(
+            totalSpeakers: totalSpeakers,
+            totalSegments: segmentCount,
+            totalDuration: totalDuration
+        ))
+        
+        // Reset state
+        sampleBuffer.removeAll()
+        streamingAsrBuffer.removeAll()
+        currentStreamText = ""
+        recordingStartTime = nil
+    }
+    
+    /// Process an incoming audio chunk in real-time
+    private func processStreamingChunk(_ samples: [Float]) async {
+        let chunkTime = Date().timeIntervalSince(recordingStartTime ?? Date())
+        
+        // Accumulate samples for full recording and streaming ASR
+        sampleBuffer.append(contentsOf: samples)
+        streamingAsrBuffer.append(contentsOf: samples)
+        
+        // Feed to audio stream for real-time diarization
+        do {
+            try audioStream?.write(from: samples)
+        } catch {
+            // Non-fatal, continue processing
+        }
+        
+        // Check for pause detection first
+        let isPause = detectPause(samples: samples, currentTime: chunkTime)
+        
+        // Only run ASR when we have enough samples OR when a pause is detected
+        let shouldRunAsr = streamingAsrBuffer.count >= minAsrSamples && 
+                           (chunkTime - lastAsrTime) >= asrInterval
+        let shouldFlushOnPause = isPause && !streamingAsrBuffer.isEmpty
+        
+        guard shouldRunAsr || shouldFlushOnPause else { return }
+        guard let asrManager = asrManager else { return }
+        
+        // Run ASR on accumulated buffer
+        let samplesToProcess = streamingAsrBuffer
+        streamingAsrBuffer.removeAll()
+        lastAsrTime = chunkTime
+        
+        do {
+            let result = try await asrManager.transcribe(samplesToProcess, source: .microphone)
+            let newText = result.text.trimmingCharacters(in: .whitespaces)
+            
+            // Accumulate text
+            if !newText.isEmpty {
+                currentStreamText += (currentStreamText.isEmpty ? "" : " ") + newText
+            }
+            
+            // Emit volatile for UI feedback
+            if !currentStreamText.isEmpty {
+                emit(VolatileMessage(text: currentStreamText))
+            }
+            
+            // If pause detected, emit segment
+            if isPause && !currentStreamText.trimmingCharacters(in: .whitespaces).isEmpty {
+                emit(SegmentMessage(
+                    speakerId: currentSpeakerId,
+                    text: currentStreamText.trimmingCharacters(in: .whitespaces),
+                    start: lastEmittedEnd,
+                    end: chunkTime,
+                    isFinal: true
+                ))
+                
+                segmentCount += 1
+                lastEmittedEnd = chunkTime
+                currentStreamText = ""
+                silenceStartTime = nil  // Reset for next segment
+            }
+        } catch {
+            // ASR errors are non-fatal for streaming - silently continue
+            // The audio is still being accumulated in sampleBuffer for final transcription
+        }
+    }
+    
+    // MARK: - Pause Detection
+    
+    /// Detect if we're in a pause (silence) that indicates segment boundary
+    private func detectPause(samples: [Float], currentTime: Double) -> Bool {
+        let rms = calculateRMS(samples)
+        
+        if rms < silenceThreshold {
+            // Currently silent
+            if silenceStartTime == nil {
+                silenceStartTime = currentTime
+            }
+            
+            // Check if pause is long enough
+            if let start = silenceStartTime, (currentTime - start) >= pauseDuration {
+                return true
+            }
+        } else {
+            // Speech detected - reset silence timer
+            silenceStartTime = nil
+            lastSpeechTime = currentTime
+        }
+        
+        return false
+    }
+    
+    /// Calculate RMS (root mean square) energy of audio samples
+    private func calculateRMS(_ samples: [Float]) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        let sumOfSquares = samples.reduce(0) { $0 + $1 * $1 }
+        return sqrt(sumOfSquares / Float(samples.count))
     }
     
     // MARK: - Private Methods
@@ -133,9 +313,13 @@ actor AudioProcessor {
             // Update total speakers
             totalSpeakers = max(totalSpeakers, diarizer.speakerManager.speakerCount)
             
-            // Emit speaker segments
+            // Emit speaker segments and update current speaker
             for segment in result.segments {
                 let speakerId = extractSpeakerId(from: segment.speakerId)
+                
+                // Update current speaker for real-time segment attribution
+                currentSpeakerId = speakerId
+                
                 emit(SpeakerMessage(
                     id: speakerId,
                     start: Double(segment.startTimeSeconds),
@@ -159,7 +343,8 @@ actor AudioProcessor {
             speakerId: speakerId,
             text: text,
             start: 0.0,
-            end: duration
+            end: duration,
+            isFinal: true
         )
         
         collectedSegments.append(segment)

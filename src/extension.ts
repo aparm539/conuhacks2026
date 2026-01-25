@@ -11,9 +11,9 @@ import { createStatusBarItem, updateStatusBar, showStatusBarMenu, StatusBarCallb
 import { getSession, getAuthState, onSessionChange, registerSessionChangeListener } from './githubAuth';
 import { getSelectedDevice, selectAudioDevice, listAudioDevices } from './audioDeviceManager';
 import { ContextCollector, RecordingContext } from './contextCollector';
-import { WordInfo, groupWordsBySpeaker, findCommentLocationsBatch } from './speechAlignment';
+import { findCommentLocationsBatch } from './speechAlignment';
 import type { SpeakerSegment, TransformedSegment } from './types';
-import { getPrContext } from './gitHubPrContext';
+import { getPrContext } from './githubPrContext';
 import { postReviewComments, type ReviewCommentInput } from './githubPrComments';
 import { getRepositoryRelativePath } from './utils/filePath';
 import { processSegmentsCombined, initializeGeminiService, resetGeminiClient } from './services/gemini';
@@ -40,9 +40,6 @@ export function activate(context: vscode.ExtensionContext) {
 
 
 	// Recording functionality setup
-	const serverPath = path.join(context.extensionPath, 'out', 'server.js');
-
-	let serverProcess: ChildProcess | null = null;
 	let isRecording = false;
 	const contextCollector = new ContextCollector();
 	let pendingContext: RecordingContext[] | null = null;
@@ -178,8 +175,11 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Fluid helper process for transcription/diarization
 	let fluidHelper: ChildProcess | null = null;
-	let pendingSegments: SpeakerSegment[] = [];
 	let fluidHelperReady = false;
+	
+	// Real-time processing state
+	let processedSegmentCount = 0;
+	let pendingGitHubComments: ReviewCommentInput[] = [];
 
 	// Model download timeout: 15 minutes for first-run downloads (~650MB)
 	const MODEL_DOWNLOAD_TIMEOUT_MS = 900000;
@@ -267,6 +267,14 @@ export function activate(context: vscode.ExtensionContext) {
 	let modelDownloadProgress: vscode.Progress<{ message?: string; increment?: number }> | null = null;
 
 	/**
+	 * Truncate text for status bar display
+	 */
+	function truncate(text: string, maxLength: number): string {
+		if (text.length <= maxLength) { return text; }
+		return '...' + text.slice(-maxLength);
+	}
+
+	/**
 	 * Handle messages from fluid-helper
 	 * @param showSuccessMessage - Whether to show a success message when models are ready
 	 */
@@ -293,26 +301,63 @@ export function activate(context: vscode.ExtensionContext) {
 					});
 				}
 				break;
+			case 'recordingStatus':
+				if (msg.status === 'started') {
+					console.log('[FluidHelper] Recording started');
+					processedSegmentCount = 0;
+					pendingGitHubComments = [];
+				} else if (msg.status === 'stopped') {
+					console.log('[FluidHelper] Recording stopped');
+				} else if (msg.status === 'error') {
+					vscode.window.showErrorMessage(`Recording error: ${msg.error}`);
+					isRecording = false;
+					refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+				}
+				break;
 			case 'volatile':
-				// Interim transcription results - update status bar
-				console.log(`[FluidHelper] Volatile: ${msg.text}`);
+				// Real-time interim transcription - show in status bar
+				statusBarItem.text = `$(pulse) ${truncate(String(msg.text), 30)}`;
 				break;
 			case 'confirmed':
 				console.log(`[FluidHelper] Confirmed: ${msg.text} (confidence: ${msg.confidence})`);
 				break;
 			case 'segment':
-				// Collect segments for Gemini processing
-				pendingSegments.push({
-					speakerTag: msg.speakerId as number,
-					text: msg.text as string,
-					startTime: msg.start as number,
-					endTime: msg.end as number
-				});
+				// REAL-TIME SEGMENT PROCESSING - don't wait for recording to stop!
+				if (msg.isFinal) {
+					console.log(`[FluidHelper] Final segment: Speaker ${msg.speakerId}: "${msg.text}"`);
+					
+					// Process with Gemini immediately (non-blocking)
+					processSegmentRealTime({
+						speakerTag: msg.speakerId as number,
+						text: msg.text as string,
+						startTime: msg.start as number,
+						endTime: msg.end as number
+					}).catch(err => {
+						console.error('Real-time segment processing failed:', err);
+					});
+					
+					processedSegmentCount++;
+					statusBarItem.text = `$(pulse) ${processedSegmentCount} segments`;
+				}
 				break;
 			case 'done':
-				// All segments received, process with Gemini
-				await processRecordedSegments(pendingSegments, pendingContext || []);
-				pendingSegments = [];
+				// Recording finished - all segments already processed during recording
+				console.log(`[FluidHelper] Done: ${msg.totalSegments} segments, ${msg.totalSpeakers} speakers`);
+				isRecording = false;
+				refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+				
+				// Post GitHub comments now
+				postPendingGitHubComments().catch(err => {
+					console.error('Failed to post GitHub comments:', err);
+				});
+				
+				vscode.window.showInformationMessage(
+					`Created ${processedSegmentCount} comment(s) from ${msg.totalSpeakers} speaker(s)`
+				);
+				break;
+			case 'speaker':
+				// Real-time speaker detection
+				console.log(`[FluidHelper] Speaker ${msg.id}: ${msg.start}s - ${msg.end}s`);
 				break;
 			case 'error':
 				console.error(`[FluidHelper] Error: ${msg.message}`);
@@ -322,208 +367,129 @@ export function activate(context: vscode.ExtensionContext) {
 	}
 
 	/**
-	 * Process recorded segments with Gemini and create comments
+	 * Process a single segment in real-time during recording
+	 * This runs concurrently - doesn't block the recording flow
 	 */
-	async function processRecordedSegments(segments: SpeakerSegment[], contexts: RecordingContext[]) {
-		if (segments.length === 0) {
-			vscode.window.showWarningMessage('No speech segments found in recording.');
+	async function processSegmentRealTime(segment: SpeakerSegment): Promise<void> {
+		const contexts = contextCollector.getCurrentContext();
+		
+		// Process single segment with Gemini (classify + transform)
+		const transformed = await processSegmentsCombined([segment]);
+		
+		if (transformed.length === 0 || transformed[0].classification === 'Ignore') {
+			console.log(`[RealTime] Segment ignored: "${segment.text}"`);
 			return;
 		}
-
-		await vscode.window.withProgress({
-			location: vscode.ProgressLocation.Notification,
-			title: "Processing Speech",
-			cancellable: false
-		}, async (progress) => {
-			progress.report({ increment: 0, message: `Processing ${segments.length} segments...` });
-
-			try {
-				// Process segments with Gemini (classify, split, transform)
-				const transformedSegments = await processSegmentsCombined(segments);
-				console.log(`[EXTENSION] Processed ${segments.length} segments into ${transformedSegments.length} transformed segments`);
-
-				// Log classification breakdown
-				const classificationCounts = transformedSegments.reduce((acc, seg) => {
-					acc[seg.classification] = (acc[seg.classification] || 0) + 1;
-					return acc;
-				}, {} as Record<string, number>);
-				console.log(`[EXTENSION] Classification breakdown:`, classificationCounts);
-
-				progress.report({ increment: 60, message: `Creating ${transformedSegments.length} comments...` });
-
-				// Create comments
-				await createComments(transformedSegments, contexts);
-
-				progress.report({ increment: 40, message: "Complete!" });
-			} catch (error) {
-				console.error('Processing failed:', error);
-				const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-				vscode.window.showErrorMessage(`Failed to process speech: ${errorMessage}`);
-			}
+		
+		const transformedSegment = transformed[0];
+		
+		// Find location and create comment immediately
+		const editor = vscode.window.activeTextEditor;
+		if (!editor) { return; }
+		
+		const document = editor.document;
+		const currentFile = getRepositoryRelativePath(document.uri);
+		
+		// Find comment location
+		const ranges = await findCommentLocationsBatch(
+			[transformedSegment],
+			contexts,
+			document,
+			currentFile || ''
+		);
+		
+		const range = ranges[0];
+		const commentText = transformedSegment.transformedText;
+		
+		// Create VS Code comment thread
+		const comment: vscode.Comment = {
+			body: new vscode.MarkdownString(commentText),
+			mode: vscode.CommentMode.Preview,
+			author: { name: 'PR Notes' }
+		};
+		
+		commentController.createCommentThread(document.uri, range, [comment]);
+		
+		// Queue for GitHub posting (batched at end)
+		pendingGitHubComments.push({
+			path: currentFile ?? '',
+			line: range.start.line + 1,
+			body: commentText
 		});
-
-		isRecording = false;
-		refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+		
+		console.log(`[RealTime] Created comment: "${commentText.slice(0, 50)}..."`);
 	}
 
 	/**
-	 * Send audio data to fluid-helper for processing
+	 * Post accumulated GitHub comments after recording stops
 	 */
-	function sendAudioToFluidHelper(audioData: Buffer) {
-		if (!fluidHelper?.stdin) {
-			console.error('[FluidHelper] Not ready to receive audio');
+	async function postPendingGitHubComments(): Promise<void> {
+		if (pendingGitHubComments.length === 0) { return; }
+		
+		const postToGitHub = vscode.workspace.getConfiguration('pr-notes').get<boolean>('postToGitHub') ?? true;
+		if (!postToGitHub) {
+			pendingGitHubComments = [];
 			return;
 		}
-
-		// Convert WAV to PCM and send to helper
-		// The fluid-helper expects 16kHz mono PCM data
-		const pcmData = extractPCMFromWAV(audioData);
-		const msg = { type: 'audio', data: pcmData.toString('base64'), sampleRate: 16000 };
-		fluidHelper.stdin.write(JSON.stringify(msg) + '\n');
-	}
-
-	/**
-	 * Extract PCM data from WAV buffer
-	 * Assumes WAV is 16-bit PCM (most common format from sox)
-	 */
-	function extractPCMFromWAV(wavBuffer: Buffer): Buffer {
-		// WAV header is typically 44 bytes
-		// Find "data" chunk
-		let dataOffset = 44;
-		for (let i = 0; i < wavBuffer.length - 4; i++) {
-			if (wavBuffer.toString('ascii', i, i + 4) === 'data') {
-				// Skip "data" + 4 bytes for chunk size
-				dataOffset = i + 8;
-				break;
-			}
-		}
-		return wavBuffer.subarray(dataOffset);
-	}
-
-	/**
-	 * Signal end of audio to fluid-helper
-	 */
-	function endFluidHelperAudio() {
-		if (!fluidHelper?.stdin) {
+		
+		const session = await getSession(false);
+		if (!session) {
+			pendingGitHubComments = [];
 			return;
 		}
-		fluidHelper.stdin.write(JSON.stringify({ type: 'end' }) + '\n');
-	}
-
-	function startServer() {
-		if (serverProcess) {
+		
+		const prContext = await getPrContext(session.accessToken);
+		if (!prContext) {
+			pendingGitHubComments = [];
 			return;
 		}
-
-		serverProcess = spawn('node', [serverPath], {
-			stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-			cwd: process.cwd()
-		});
-
-		// Handle child process events
-		serverProcess.on('close', (code, signal) => {
-			console.log(`Server process exited with code ${code}, Signal: ${signal}`);
-			serverProcess = null;
-			isRecording = false;
-			if (pendingContext === null) {
-				contextCollector.clear();
-			}
-			pendingContext = null;
-			refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
-		});
-
-		serverProcess.on('message', async (message: { type: string; data: string }) => {
-			console.log("[EXTENSION] Received audio from recorder");
-			if (message.type === 'audio') {
-				const audioData = Buffer.from(message.data, 'base64');
-				const contextsToUse = pendingContext;
-				pendingContext = null;
-
-				// Save audio file
-				const storageUri = context.globalStorageUri;
-				const recordingsUri = vscode.Uri.joinPath(storageUri, 'recordings');
-				await vscode.workspace.fs.createDirectory(recordingsUri);
-
-				const fileName = `${Date.now()}.wav`;
-				const fileUri = vscode.Uri.joinPath(recordingsUri, fileName);
-				await vscode.workspace.fs.writeFile(fileUri, audioData);
-				console.log(`[EXTENSION] Recording saved: ${fileName}`);
-
-				// Save context if available
-				if (contextsToUse && contextsToUse.length > 0) {
-					const contextFileName = fileName.replace('.wav', '.context.json');
-					const contextUri = vscode.Uri.joinPath(recordingsUri, contextFileName);
-					const contextBuffer = Buffer.from(JSON.stringify(contextsToUse, null, 2), 'utf8');
-					await vscode.workspace.fs.writeFile(contextUri, contextBuffer);
-				}
-
-				// Process with fluid-helper
-				try {
-					// Start helper if not running
-					await startFluidHelper();
-
-					// Store context for when segments arrive
-					pendingContext = contextsToUse;
-
-					// Send audio to helper
-					sendAudioToFluidHelper(audioData);
-					endFluidHelperAudio();
-
-				} catch (error) {
-					console.error('Failed to process with fluid-helper:', error);
-					const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-					vscode.window.showErrorMessage(`Failed to start transcription: ${errorMessage}. Make sure fluid-helper is built.`);
-					isRecording = false;
-					refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
-				}
-			}
-		});
-
-		serverProcess.on('error', (err) => {
-			console.error('Failed to start server process:', err);
-			serverProcess = null;
-			isRecording = false;
-			if (pendingContext === null) {
-				contextCollector.clear();
-			}
-			pendingContext = null;
-			refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
-		});
-
-		serverProcess.stdout?.on('data', (data) => {
-			console.log(`[Recorder]: ${data.toString().trim()}`);
-		});
+		
+		const result = await postReviewComments(pendingGitHubComments, prContext, session.accessToken);
+		if (result.success) {
+			vscode.window.showInformationMessage(`Posted ${pendingGitHubComments.length} comment(s) to GitHub`);
+		} else {
+			vscode.window.showErrorMessage(`Failed to post to GitHub: ${result.error}`);
+		}
+		
+		pendingGitHubComments = [];
 	}
+
+
 
 	function handleStartRecording() {
 		if (isRecording) {
 			return;
 		}
 
-		startServer();
-		
 		const selectedDevice = getSelectedDevice();
 		contextCollector.startRecording();
 		
-		// Wait then send start 
-		setTimeout(async () => {
-			if (serverProcess && serverProcess.send) {
-				serverProcess.send({ command: 'start', device: selectedDevice });
+		// Start fluid-helper if not running, then send recording command with device
+		startFluidHelper().then(() => {
+			if (fluidHelper?.stdin) {
+				const msg = { 
+					type: 'startRecording',
+					deviceId: selectedDevice !== 'default' ? selectedDevice : undefined
+				};
+				fluidHelper.stdin.write(JSON.stringify(msg) + '\n');
 				isRecording = true;
-				await refreshStatusBar();
+				refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 			}
-		}, 100);
+		}).catch(err => {
+			vscode.window.showErrorMessage(`Failed to start recording: ${err.message}`);
+		});
 	}
 
 	function handleStopRecording() {
-		if (!isRecording || !serverProcess || !serverProcess.send) {
+		if (!isRecording || !fluidHelper?.stdin) {
 			return; // Not recording
 		}
 
 		// Stop context collection and store the context
 		pendingContext = contextCollector.stopRecording();
 
-		serverProcess.send({ command: 'stop' });
+		fluidHelper.stdin.write(JSON.stringify({ type: 'stopRecording' }) + '\n');
+		// isRecording will be set to false when 'done' message arrives
 	}
 
 	async function handleSelectDevice(): Promise<void> {

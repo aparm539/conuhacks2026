@@ -6,11 +6,15 @@ enum InputMessage: Decodable {
     case initialize
     case audio(data: Data, sampleRate: Int)
     case end
+    case startRecording(deviceId: String?)
+    case stopRecording
+    case listDevices
     
     enum CodingKeys: String, CodingKey {
         case type
         case data
         case sampleRate
+        case deviceId
     }
     
     init(from decoder: Decoder) throws {
@@ -29,6 +33,13 @@ enum InputMessage: Decodable {
             self = .audio(data: data, sampleRate: sampleRate)
         case "end":
             self = .end
+        case "startRecording":
+            let deviceId = try container.decodeIfPresent(String.self, forKey: .deviceId)
+            self = .startRecording(deviceId: deviceId)
+        case "stopRecording":
+            self = .stopRecording
+        case "listDevices":
+            self = .listDevices
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown message type: \(type)")
         }
@@ -49,6 +60,17 @@ struct ProgressMessage: Encodable {
     let percent: Int?   // 0-100, nil if indeterminate
 }
 
+struct RecordingStatusMessage: Encodable {
+    let type = "recordingStatus"
+    let status: String  // "started", "stopped", "error"
+    var error: String?
+    
+    init(status: String, error: String? = nil) {
+        self.status = status
+        self.error = error
+    }
+}
+
 struct VolatileMessage: Encodable {
     let type = "volatile"
     let text: String
@@ -67,24 +89,32 @@ struct SpeakerMessage: Encodable {
     let end: Double
 }
 
+/// Confirmed segment with speaker attribution - ready for processing
+/// Emitted in real-time as segments become stable (not waiting for stop)
 struct SegmentMessage: Encodable {
     let type = "segment"
     let speakerId: Int
     let text: String
     let start: Double
     let end: Double
+    let isFinal: Bool  // true = segment is stable and won't change
 }
 
+/// Summary emitted when recording stops (all segments already sent)
 struct DoneMessage: Encodable {
     let type = "done"
     let totalSpeakers: Int
-    let segments: [SegmentData]
+    let totalSegments: Int
+    let totalDuration: Double
+}
+
+struct DevicesMessage: Encodable {
+    let type = "devices"
+    let devices: [DeviceInfo]
     
-    struct SegmentData: Encodable {
-        let speakerId: Int
-        let text: String
-        let start: Double
-        let end: Double
+    struct DeviceInfo: Encodable {
+        let id: String
+        let name: String
     }
 }
 
