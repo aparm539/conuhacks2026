@@ -89,30 +89,27 @@ export interface BatchLocationSelectionResponse {
   }>;
 }
 
-// Error response types
-export interface ClassificationErrorResponse extends ClassificationResponse {
+// Error response types - using generics to reduce duplication
+type WithError<T> = T & { error: string };
+
+export interface ClassificationErrorResponse extends WithError<ClassificationResponse> {
   classifiedSegments: [];
-  error: string;
 }
 
-export interface TransformationErrorResponse extends TransformationResponse {
+export interface TransformationErrorResponse extends WithError<TransformationResponse> {
   transformedSegments: [];
-  error: string;
 }
 
-export interface SplitErrorResponse extends SplitResponse {
+export interface SplitErrorResponse extends WithError<SplitResponse> {
   splitSegments: [];
-  error: string;
 }
 
-export interface LocationSelectionErrorResponse extends LocationSelectionResponse {
+export interface LocationSelectionErrorResponse extends WithError<LocationSelectionResponse> {
   selectedIndex: 0;
-  error: string;
 }
 
-export interface BatchLocationSelectionErrorResponse extends BatchLocationSelectionResponse {
+export interface BatchLocationSelectionErrorResponse extends WithError<BatchLocationSelectionResponse> {
   locations: [];
-  error: string;
 }
 
 // Diar-service types

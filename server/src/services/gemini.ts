@@ -13,7 +13,7 @@ import {
   CONTEXT_SIZE,
   GEMINI_MODEL,
 } from '../config/constants';
-import { parseJsonArray } from '../utils/jsonParser';
+import { parseJsonArray, parseJsonResponse } from '../utils/jsonParser';
 import { VALID_CLASSIFICATIONS } from '../types';
 
 /**
@@ -58,19 +58,7 @@ Classifications:`;
   const text = response.text();
 
   // Parse JSON response
-  let classifications: string[];
-  try {
-    // Extract JSON from response (might have markdown code blocks)
-    const jsonMatch = text.match(/\[.*?\]/s);
-    if (jsonMatch) {
-      classifications = JSON.parse(jsonMatch[0]);
-    } else {
-      classifications = JSON.parse(text);
-    }
-  } catch (error) {
-    console.error('Failed to parse Gemini response:', text);
-    throw new Error(`Failed to parse classification response: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  }
+  const classifications = parseJsonResponse<string[]>(text);
 
   // Validate classifications
   if (!Array.isArray(classifications) || classifications.length !== segments.length) {
@@ -181,19 +169,7 @@ Transformed comments:`;
   const text = response.text();
 
   // Parse JSON response
-  let transformedTexts: string[];
-  try {
-    // Extract JSON from response (might have markdown code blocks)
-    const jsonMatch = text.match(/\[.*?\]/s);
-    if (jsonMatch) {
-      transformedTexts = JSON.parse(jsonMatch[0]);
-    } else {
-      transformedTexts = JSON.parse(text);
-    }
-  } catch (error) {
-    console.error('Failed to parse Gemini transformation response:', text);
-    throw new Error(`Failed to parse transformation response: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  }
+  const transformedTexts = parseJsonResponse<string[]>(text);
 
   // Validate response
   if (!Array.isArray(transformedTexts) || transformedTexts.length !== segments.length) {
@@ -551,22 +527,8 @@ Selection:`;
   console.log(`[Location Selection] Received response from Gemini (${text.length} chars)`);
 
   // Parse JSON response
-  let selection: { selectedIndex: number; rationale?: string };
-  try {
-    // Extract JSON from response (might have markdown code blocks)
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      selection = JSON.parse(jsonMatch[0]);
-      console.log(`[Location Selection] Parsed JSON from response (extracted from markdown)`);
-    } else {
-      selection = JSON.parse(text);
-      console.log(`[Location Selection] Parsed JSON directly from response`);
-    }
-  } catch (error) {
-    console.error('[Location Selection] ERROR: Failed to parse Gemini response');
-    console.error('[Location Selection] Raw response:', text);
-    throw new Error(`Failed to parse location selection response: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  }
+  const selection = parseJsonResponse<{ selectedIndex: number; rationale?: string }>(text);
+  console.log(`[Location Selection] Parsed JSON from response`);
 
   // Validate response
   if (typeof selection.selectedIndex !== 'number') {
@@ -680,22 +642,8 @@ Selections:`;
   console.log(`[Location Selection Batch] Received response from Gemini (${text.length} chars)`);
 
   // Parse JSON response
-  let selections: Array<{ selectedIndex: number; rationale?: string }>;
-  try {
-    // Extract JSON from response (might have markdown code blocks)
-    const jsonMatch = text.match(/\[[\s\S]*\]/);
-    if (jsonMatch) {
-      selections = JSON.parse(jsonMatch[0]);
-      console.log(`[Location Selection Batch] Parsed JSON from response (extracted from markdown)`);
-    } else {
-      selections = JSON.parse(text);
-      console.log(`[Location Selection Batch] Parsed JSON directly from response`);
-    }
-  } catch (error) {
-    console.error('[Location Selection Batch] ERROR: Failed to parse Gemini response');
-    console.error('[Location Selection Batch] Raw response:', text);
-    throw new Error(`Failed to parse batch location selection response: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  }
+  const selections = parseJsonResponse<Array<{ selectedIndex: number; rationale?: string }>>(text);
+  console.log(`[Location Selection Batch] Parsed JSON from response`);
 
   // Validate response
   if (!Array.isArray(selections)) {

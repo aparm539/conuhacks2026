@@ -2,7 +2,9 @@
  * TypeScript type definitions for the Speaker Diarization API
  */
 
-export interface SpeakerSegment {
+// Note: SpeakerSegment for diarization service uses different field names
+// This matches DiarizationSpeakerSegment from server types
+export interface DiarizationSpeakerSegment {
     speaker: string;
     start: number;
     end: number;
@@ -11,7 +13,7 @@ export interface SpeakerSegment {
 
 export interface DiarizationResponse {
     success: boolean;
-    segments: SpeakerSegment[];
+    segments: DiarizationSpeakerSegment[];
     total_speakers: number;
     total_duration: number;
     message?: string;

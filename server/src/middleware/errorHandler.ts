@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import { ApiError } from './validation';
 
 /**
  * Centralized error handling middleware
@@ -12,6 +13,13 @@ export function errorHandler(
 ): void {
   console.error(`[ERROR] ${req.method} ${req.path}:`, error);
   console.error('[ERROR] Stack:', error.stack || 'No stack trace');
+
+  // Handle ApiError with custom status code
+  if (error instanceof ApiError) {
+    return res.status(error.statusCode).json({
+      error: error.message
+    });
+  }
 
   // Default to 500 if status code not set
   const statusCode = (res as any).statusCode || 500;

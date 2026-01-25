@@ -156,6 +156,59 @@ export function findNearestContexts(
 }
 
 /**
+ * Find a symbol by name recursively in a document symbol tree
+ */
+function findSymbolByName(
+	symbols: vscode.DocumentSymbol[],
+	name: string
+): vscode.DocumentSymbol | null {
+	for (const symbol of symbols) {
+		if (symbol.name === name) {
+			return symbol;
+		}
+		if (symbol.children && symbol.children.length > 0) {
+			const found = findSymbolByName(symbol.children, name);
+			if (found) {
+				return found;
+			}
+		}
+	}
+	return null;
+}
+
+/**
+ * Create a range from a line number (full line)
+ */
+function createRangeFromLine(document: vscode.TextDocument, line: number): vscode.Range {
+	const lineText = document.lineAt(line);
+	return new vscode.Range(line, 0, line, lineText.text.length);
+}
+
+/**
+ * Create a range from a symbol's start line
+ */
+function createRangeFromSymbol(symbol: vscode.DocumentSymbol, document: vscode.TextDocument): vscode.Range {
+	const line = document.lineAt(symbol.range.start.line);
+	return new vscode.Range(
+		symbol.range.start.line,
+		0,
+		symbol.range.start.line,
+		line.text.length
+	);
+}
+
+/**
+ * Create a range from visible range start line
+ */
+function createRangeFromVisibleRange(document: vscode.TextDocument, visibleRange: [number, number]): vscode.Range | null {
+	const lineCount = document.lineCount;
+	if (visibleRange[0] >= 0 && visibleRange[0] < lineCount) {
+		return createRangeFromLine(document, visibleRange[0]);
+	}
+	return null;
+}
+
+/**
  * Extract code context around visible symbols from a document
  * Returns formatted code snippet with line numbers
  */
@@ -165,25 +218,6 @@ export async function extractCodeContext(
 ): Promise<string> {
 	const lineCount = document.lineCount;
 	const codeSnippets: string[] = [];
-
-	// Helper to find symbol by name recursively
-	const findSymbolByName = (
-		symbols: vscode.DocumentSymbol[],
-		name: string
-	): vscode.DocumentSymbol | null => {
-		for (const symbol of symbols) {
-			if (symbol.name === name) {
-				return symbol;
-			}
-			if (symbol.children && symbol.children.length > 0) {
-				const found = findSymbolByName(symbol.children, name);
-				if (found) {
-					return found;
-				}
-			}
-		}
-		return null;
-	};
 
 	// Try to extract code around visible symbols
 	if (context.symbolsInView && context.symbolsInView.length > 0) {
@@ -274,8 +308,7 @@ export async function findCommentLocation(
 
 	if (candidateContexts.length === 0) {
 		// Fallback: use file-level
-		const firstLine = document.lineAt(0);
-		return new vscode.Range(0, 0, 0, firstLine.text.length);
+		return createRangeFromLine(document, 0);
 	}
 
 	// Extract code context for each candidate
@@ -318,13 +351,7 @@ export async function findCommentLocation(
 				
 				// Convert to range - prefer cursor line, then first visible symbol
 				if (selectedCandidate.cursorLine >= 0 && selectedCandidate.cursorLine < lineCount) {
-					const line = document.lineAt(selectedCandidate.cursorLine);
-					return new vscode.Range(
-						selectedCandidate.cursorLine,
-						0,
-						selectedCandidate.cursorLine,
-						line.text.length
-					);
+					return createRangeFromLine(document, selectedCandidate.cursorLine);
 				}
 
 				// Try visible symbols
@@ -336,34 +363,10 @@ export async function findCommentLocation(
 						);
 
 						if (symbols && Array.isArray(symbols)) {
-							const findSymbolByName = (
-								symbols: vscode.DocumentSymbol[],
-								name: string
-							): vscode.DocumentSymbol | null => {
-								for (const symbol of symbols) {
-									if (symbol.name === name) {
-										return symbol;
-									}
-									if (symbol.children && symbol.children.length > 0) {
-										const found = findSymbolByName(symbol.children, name);
-										if (found) {
-											return found;
-										}
-									}
-								}
-								return null;
-							};
-
 							for (const symbolName of selectedCandidate.symbolsInView) {
 								const symbol = findSymbolByName(symbols, symbolName);
 								if (symbol) {
-									const line = document.lineAt(symbol.range.start.line);
-									return new vscode.Range(
-										symbol.range.start.line,
-										0,
-										symbol.range.start.line,
-										line.text.length
-									);
+									return createRangeFromSymbol(symbol, document);
 								}
 							}
 						}
@@ -373,14 +376,9 @@ export async function findCommentLocation(
 				}
 
 				// Fallback to visible range start
-				if (selectedCandidate.visibleRange[0] >= 0 && selectedCandidate.visibleRange[0] < lineCount) {
-					const line = document.lineAt(selectedCandidate.visibleRange[0]);
-					return new vscode.Range(
-						selectedCandidate.visibleRange[0],
-						0,
-						selectedCandidate.visibleRange[0],
-						line.text.length
-					);
+				const visibleRange = createRangeFromVisibleRange(document, selectedCandidate.visibleRange);
+				if (visibleRange) {
+					return visibleRange;
 				}
 			}
 		}
@@ -393,13 +391,7 @@ export async function findCommentLocation(
 	
 	// 1. Try cursor line
 	if (fallbackContext.cursorLine >= 0 && fallbackContext.cursorLine < lineCount) {
-		const line = document.lineAt(fallbackContext.cursorLine);
-		return new vscode.Range(
-			fallbackContext.cursorLine,
-			0,
-			fallbackContext.cursorLine,
-			line.text.length
-		);
+		return createRangeFromLine(document, fallbackContext.cursorLine);
 	}
 
 	// 2. Try visible symbols
@@ -411,34 +403,10 @@ export async function findCommentLocation(
 			);
 
 			if (symbols && Array.isArray(symbols)) {
-				const findSymbolByName = (
-					symbols: vscode.DocumentSymbol[],
-					name: string
-				): vscode.DocumentSymbol | null => {
-					for (const symbol of symbols) {
-						if (symbol.name === name) {
-							return symbol;
-						}
-						if (symbol.children && symbol.children.length > 0) {
-							const found = findSymbolByName(symbol.children, name);
-							if (found) {
-								return found;
-							}
-						}
-					}
-					return null;
-				};
-
 				for (const symbolName of fallbackContext.symbolsInView) {
 					const symbol = findSymbolByName(symbols, symbolName);
 					if (symbol) {
-						const line = document.lineAt(symbol.range.start.line);
-						return new vscode.Range(
-							symbol.range.start.line,
-							0,
-							symbol.range.start.line,
-							line.text.length
-						);
+						return createRangeFromSymbol(symbol, document);
 					}
 				}
 			}
@@ -448,8 +416,7 @@ export async function findCommentLocation(
 	}
 
 	// 3. File-level fallback (line 0)
-	const firstLine = document.lineAt(0);
-	return new vscode.Range(0, 0, 0, firstLine.text.length);
+	return createRangeFromLine(document, 0);
 }
 
 /**
@@ -532,20 +499,13 @@ export async function findCommentLocationsBatch(
 
 			if (!selectedCandidate) {
 				// Fallback to file-level
-				const firstLine = document.lineAt(0);
-				ranges.push(new vscode.Range(0, 0, 0, firstLine.text.length));
+				ranges.push(createRangeFromLine(document, 0));
 				continue;
 			}
 
 			// Convert to range - prefer cursor line, then visible symbols, then visible range
 			if (selectedCandidate.cursorLine >= 0 && selectedCandidate.cursorLine < lineCount) {
-				const line = document.lineAt(selectedCandidate.cursorLine);
-				ranges.push(new vscode.Range(
-					selectedCandidate.cursorLine,
-					0,
-					selectedCandidate.cursorLine,
-					line.text.length
-				));
+				ranges.push(createRangeFromLine(document, selectedCandidate.cursorLine));
 				continue;
 			}
 
@@ -558,34 +518,10 @@ export async function findCommentLocationsBatch(
 					);
 
 					if (symbols && Array.isArray(symbols)) {
-						const findSymbolByName = (
-							symbols: vscode.DocumentSymbol[],
-							name: string
-						): vscode.DocumentSymbol | null => {
-							for (const symbol of symbols) {
-								if (symbol.name === name) {
-									return symbol;
-								}
-								if (symbol.children && symbol.children.length > 0) {
-									const found = findSymbolByName(symbol.children, name);
-									if (found) {
-										return found;
-									}
-								}
-							}
-							return null;
-						};
-
 						for (const symbolName of selectedCandidate.symbolsInView) {
 							const symbol = findSymbolByName(symbols, symbolName);
 							if (symbol) {
-								const line = document.lineAt(symbol.range.start.line);
-								ranges.push(new vscode.Range(
-									symbol.range.start.line,
-									0,
-									symbol.range.start.line,
-									line.text.length
-								));
+								ranges.push(createRangeFromSymbol(symbol, document));
 								break;
 							}
 						}
@@ -599,20 +535,14 @@ export async function findCommentLocationsBatch(
 			}
 
 			// Fallback to visible range start
-			if (selectedCandidate.visibleRange[0] >= 0 && selectedCandidate.visibleRange[0] < lineCount) {
-				const line = document.lineAt(selectedCandidate.visibleRange[0]);
-				ranges.push(new vscode.Range(
-					selectedCandidate.visibleRange[0],
-					0,
-					selectedCandidate.visibleRange[0],
-					line.text.length
-				));
+			const visibleRange = createRangeFromVisibleRange(document, selectedCandidate.visibleRange);
+			if (visibleRange) {
+				ranges.push(visibleRange);
 				continue;
 			}
 
 			// Final fallback: file-level
-			const firstLine = document.lineAt(0);
-			ranges.push(new vscode.Range(0, 0, 0, firstLine.text.length));
+			ranges.push(createRangeFromLine(document, 0));
 		}
 
 		return ranges;
