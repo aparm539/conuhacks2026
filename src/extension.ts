@@ -8,7 +8,7 @@ import {spawn, ChildProcess} from 'child_process';
 import { createStatusBarItem, updateStatusBar, showStatusBarMenu, StatusBarCallbacks } from './statusBar';
 import { getSession, getAuthState, registerSessionChangeListener } from './githubAuth';
 import { getSelectedDevice, selectAudioDevice, listAudioDevices } from './audioDeviceManager';
-import { ContextCollector, RecordingContext } from './contextCollector';
+import { ContextCollector } from './contextCollector';
 import { findCommentLocationsBatch } from './speechAlignment';
 import type { SpeakerSegment, TransformedSegment } from './types';
 import { getPrContext } from './githubPrContext';
@@ -36,7 +36,6 @@ export function activate(context: vscode.ExtensionContext) {
 	// Recording functionality setup
 	let isRecording = false;
 	const contextCollector = new ContextCollector();
-	let pendingContext: RecordingContext[] | null = null;
 
 	const commentController = vscode.comments.createCommentController('pr-notes-comments', 'PR Notes');
 
@@ -72,105 +71,6 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(registerSessionChangeListener(() => {
 		refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 	}));
-
-	async function createComments(transformedSegments: TransformedSegment[], contexts: RecordingContext[]): Promise<void> {
-		const editor = vscode.window.activeTextEditor;
-		if (!editor) {
-			vscode.window.showWarningMessage('No active editor found. Please open a file to add comments.');
-			return;
-		}
-
-		const document = editor.document;
-		
-		// Get current file path for context matching (handles git: URIs from diff view)
-		const currentFile = getRepositoryRelativePath(document.uri);
-
-		// Filter out Ignore segments (safety check - server already filters them)
-		const segmentsToComment = transformedSegments.filter(seg => seg.classification !== 'Ignore');
-		
-		console.log(`[EXTENSION] Filtered ${transformedSegments.length} transformed segments, ${segmentsToComment.length} non-Ignore segments remain`);
-
-		if (segmentsToComment.length === 0) {
-			const ignoreCount = transformedSegments.filter(seg => seg.classification === 'Ignore').length;
-			vscode.window.showWarningMessage(
-				`No speech segments found to create comments. ${transformedSegments.length} segments were processed, but ${ignoreCount} were classified as 'Ignore' and filtered out.`
-			);
-			return;
-		}
-
-		// Find all comment locations in parallel using batch API (uses local Gemini)
-		const ranges = await findCommentLocationsBatch(
-			segmentsToComment,
-			contexts,
-			document,
-			currentFile || ''
-		);
-
-		// Build GitHub review comment payload (path, 1-based line, body) and create VS Code threads
-		const reviewComments: ReviewCommentInput[] = [];
-		const filePath = currentFile ?? '';
-
-		for (let i = 0; i < segmentsToComment.length; i++) {
-			const segment = segmentsToComment[i];
-			const range = ranges[i];
-
-			// Format comment text with speaker label using transformed text
-			const commentText = `${segment.transformedText}`;
-
-			// Create comment
-			const comment: vscode.Comment = {
-				body: new vscode.MarkdownString(commentText),
-				mode: vscode.CommentMode.Preview,
-				author: { name: 'PR Notes' }
-			};
-
-			// Create comment thread at the determined location
-			commentController.createCommentThread(document.uri, range, [comment]);
-
-			// Accumulate for GitHub (1-based line)
-			const line = range.start.line >= 0 ? range.start.line + 1 : 1;
-			reviewComments.push({ path: filePath, line, body: commentText });
-		}
-
-		// Show completion message for local comments
-		const localMsg = `Created ${segmentsToComment.length} comment(s) in ${currentFile}`;
-
-		// Optionally post to GitHub
-		const postToGitHub = vscode.workspace.getConfiguration('pr-notes').get<boolean>('postToGitHub') ?? true;
-		if (!postToGitHub) {
-			vscode.window.showInformationMessage(localMsg);
-			return;
-		}
-
-		const session = await getSession(false);
-		if (!session) {
-			vscode.window.showInformationMessage(`${localMsg} Sign in and use a PR branch to post to GitHub.`);
-			return;
-		}
-
-		// Check if file path was successfully extracted (required for GitHub API)
-		if (!currentFile) {
-			vscode.window.showWarningMessage(
-				`Could not determine file path from diff view. Comments created locally but not posted to GitHub.`
-			);
-			vscode.window.showInformationMessage(localMsg);
-			return;
-		}
-
-		const prContext = await getPrContext(session.accessToken);
-		if (!prContext) {
-			vscode.window.showInformationMessage(`${localMsg} Sign in and use a PR branch to post to GitHub.`);
-			return;
-		}
-
-		const result = await postReviewComments(reviewComments, prContext, session.accessToken);
-		if (result.success) {
-			vscode.window.showInformationMessage(`Created ${segmentsToComment.length} comment(s) in ${currentFile} and on GitHub.`);
-		} else {
-			vscode.window.showInformationMessage(localMsg);
-			vscode.window.showErrorMessage(`Could not post to GitHub: ${result.error ?? 'Unknown error'}`);
-		}
-	}
 
 	// Fluid helper process for transcription/diarization
 	let fluidHelper: ChildProcess | null = null;
@@ -501,8 +401,8 @@ export function activate(context: vscode.ExtensionContext) {
 			return; // Not recording
 		}
 
-		// Stop context collection and store the context
-		pendingContext = contextCollector.stopRecording();
+		// Stop context collection
+		contextCollector.stopRecording();
 
 		fluidHelper.stdin.write(JSON.stringify({ type: 'stopRecording' }) + '\n');
 		// isRecording will be set to false when 'done' message arrives

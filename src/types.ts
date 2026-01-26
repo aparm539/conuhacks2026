@@ -1,37 +1,6 @@
 /**
  * TypeScript type definitions for the PR Notes extension
  */
-export interface DiarizationSpeakerSegment {
-    speaker: string;
-    start: number;
-    end: number;
-    duration: number;
-}
-
-export interface DiarizationResponse {
-    success: boolean;
-    segments: DiarizationSpeakerSegment[];
-    total_speakers: number;
-    total_duration: number;
-    message?: string;
-}
-
-export interface ErrorResponse {
-    success: boolean;
-    error: string;
-    message?: string;
-}
-
-export interface HealthResponse {
-    status: string;
-    service: string;
-    pipeline_loaded: boolean;
-}
-
-export interface ApiConfig {
-    baseUrl: string;
-    timeout?: number;
-}
 
 // Segment classification types
 export type SegmentClassification = 'Ignore' | 'Question' | 'Concern' | 'Suggestion' | 'Style';
