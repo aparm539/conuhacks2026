@@ -49,6 +49,24 @@
         "category": "PR Notes"
       }
     ],
+"viewsContainers": {
+      "activitybar": [
+        {
+          "id": "pr-notes",
+          "title": "PR Notes",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "pr-notes": [
+        {
+          "type": "webview",
+          "id": "pr-notes.transcriptPanel",
+          "name": "Live Transcript"
+        }
+      ]
+    },
     "configuration": {
       "title": "PR Notes",
       "properties": {

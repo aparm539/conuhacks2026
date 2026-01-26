@@ -123,6 +123,15 @@ struct ErrorMessage: Encodable {
     let message: String
 }
 
+struct DebugMessage: Encodable {
+    let type = "debug"
+    let message: String
+}
+
+func emitDebug(_ message: String) {
+    emit(DebugMessage(message: message))
+}
+
 // MARK: - Output Helper
 
 func emit<T: Encodable>(_ message: T) {

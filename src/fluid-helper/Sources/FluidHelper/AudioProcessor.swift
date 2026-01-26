@@ -25,9 +25,9 @@ actor AudioProcessor {
     
     // Streaming ASR buffer - need enough samples for meaningful transcription
     private var streamingAsrBuffer: [Float] = []
-    private let minAsrSamples: Int = 8000  // 0.5 seconds at 16kHz
+    private let minAsrSamples: Int = 24000  // 1.5 seconds at 16kHz - FluidAudio needs this much
     private var lastAsrTime: Double = 0
-    private let asrInterval: Double = 0.5  // Run ASR every 0.5 seconds
+    private let asrInterval: Double = 1.0  // Run ASR every 1 second
     
     // Pause detection settings
     private let silenceThreshold: Float = 0.01  // RMS below this = silence
@@ -172,13 +172,14 @@ actor AudioProcessor {
         }
     }
     
-    /// Stop recording - segments already emitted, just send summary
+    /// Stop recording - do final transcription if needed
     func stopRecording() async {
         recorder?.stopRecording()
         
+        let endTime = Date().timeIntervalSince(recordingStartTime ?? Date())
+        
         // Emit any remaining pending text as final segment
         if !currentStreamText.trimmingCharacters(in: .whitespaces).isEmpty {
-            let endTime = Date().timeIntervalSince(recordingStartTime ?? Date())
             emit(SegmentMessage(
                 speakerId: currentSpeakerId,
                 text: currentStreamText.trimmingCharacters(in: .whitespaces),
@@ -189,8 +190,40 @@ actor AudioProcessor {
             segmentCount += 1
         }
         
-        // All segments already sent - just emit summary
-        let totalDuration = Date().timeIntervalSince(recordingStartTime ?? Date())
+        // If no segments were produced during streaming, do a final transcription
+        // of the full accumulated audio buffer
+        if segmentCount == 0 && !sampleBuffer.isEmpty {
+            let totalSamples = sampleBuffer.count
+            let totalDurationSecs = Float(totalSamples) / sampleRate
+            emitDebug("No streaming segments produced. Running final ASR on \(totalSamples) samples (\(String(format: "%.2f", totalDurationSecs))s)")
+            
+            do {
+                if let result = try await asrManager?.transcribe(sampleBuffer, source: .microphone) {
+                    let text = result.text.trimmingCharacters(in: .whitespaces)
+                    emitDebug("Final ASR result: '\(text)' (confidence: \(result.confidence))")
+                    if !text.isEmpty {
+                        emit(SegmentMessage(
+                            speakerId: currentSpeakerId,
+                            text: text,
+                            start: 0,
+                            end: endTime,
+                            isFinal: true
+                        ))
+                        segmentCount += 1
+                    }
+                } else {
+                    emitDebug("ASR manager not available for final transcription")
+                }
+            } catch {
+                emitDebug("Final transcription error: \(error)")
+                emitError("Final transcription failed: \(error.localizedDescription)")
+            }
+        } else {
+            emitDebug("Streaming produced \(segmentCount) segments, skipping final ASR")
+        }
+        
+        // Emit summary
+        let totalDuration = endTime
         emit(DoneMessage(
             totalSpeakers: totalSpeakers,
             totalSegments: segmentCount,
@@ -222,22 +255,32 @@ actor AudioProcessor {
         // Check for pause detection first
         let isPause = detectPause(samples: samples, currentTime: chunkTime)
         
-        // Only run ASR when we have enough samples OR when a pause is detected
-        let shouldRunAsr = streamingAsrBuffer.count >= minAsrSamples && 
-                           (chunkTime - lastAsrTime) >= asrInterval
-        let shouldFlushOnPause = isPause && !streamingAsrBuffer.isEmpty
+        // Only run ASR when we have enough samples
+        // Even on pause, we need minimum samples for ASR to work
+        let hasEnoughSamples = streamingAsrBuffer.count >= minAsrSamples
+        let shouldRunAsr = hasEnoughSamples && (chunkTime - lastAsrTime) >= asrInterval
+        let shouldFlushOnPause = isPause && hasEnoughSamples
         
         guard shouldRunAsr || shouldFlushOnPause else { return }
-        guard let asrManager = asrManager else { return }
+        guard let asrManager = asrManager else {
+            emitDebug("ASR manager not available")
+            return
+        }
         
         // Run ASR on accumulated buffer
         let samplesToProcess = streamingAsrBuffer
+        let sampleCount = samplesToProcess.count
+        let durationSecs = Float(sampleCount) / sampleRate
         streamingAsrBuffer.removeAll()
         lastAsrTime = chunkTime
+        
+        emitDebug("Running streaming ASR on \(sampleCount) samples (\(String(format: "%.2f", durationSecs))s)")
         
         do {
             let result = try await asrManager.transcribe(samplesToProcess, source: .microphone)
             let newText = result.text.trimmingCharacters(in: .whitespaces)
+            
+            emitDebug("ASR result: '\(newText)' (confidence: \(result.confidence))")
             
             // Accumulate text
             if !newText.isEmpty {
@@ -265,8 +308,7 @@ actor AudioProcessor {
                 silenceStartTime = nil  // Reset for next segment
             }
         } catch {
-            // ASR errors are non-fatal for streaming - silently continue
-            // The audio is still being accumulated in sampleBuffer for final transcription
+            emitDebug("Streaming ASR error: \(error)")
         }
     }
     

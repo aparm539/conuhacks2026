@@ -1,31 +1,7 @@
 import * as vscode from 'vscode';
 import { RecordingContext } from './contextCollector';
 import { selectCommentLocationsBatch } from './services/gemini';
-import type { CandidateLocation } from './types';
-
-export interface WordInfo {
-	word: string;
-	speakerTag: number;
-	startOffset: string;
-	endOffset: string;
-}
-
-export interface SpeakerSegment {
-	speakerTag: number;
-	text: string;
-	startTime: number;
-	endTime: number;
-}
-
-export type SegmentClassification = 'Ignore' | 'Question' | 'Concern' | 'Suggestion' | 'Style';
-
-export interface ClassifiedSegment extends SpeakerSegment {
-	classification: SegmentClassification;
-}
-
-export interface TransformedSegment extends ClassifiedSegment {
-	transformedText: string;
-}
+import type { CandidateLocation, TransformedSegment } from './types';
 
 /**
  * Find a symbol by name recursively in a symbol hierarchy

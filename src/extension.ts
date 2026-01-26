@@ -5,10 +5,8 @@ import * as path from 'path';
 import * as readline from 'readline';
 
 import {spawn, ChildProcess} from 'child_process';
-import { AudioService } from './audioService';
-import { DiarizationApiClient } from './apiClient';
 import { createStatusBarItem, updateStatusBar, showStatusBarMenu, StatusBarCallbacks } from './statusBar';
-import { getSession, getAuthState, onSessionChange, registerSessionChangeListener } from './githubAuth';
+import { getSession, getAuthState, registerSessionChangeListener } from './githubAuth';
 import { getSelectedDevice, selectAudioDevice, listAudioDevices } from './audioDeviceManager';
 import { ContextCollector, RecordingContext } from './contextCollector';
 import { findCommentLocationsBatch } from './speechAlignment';
@@ -17,8 +15,9 @@ import { getPrContext } from './githubPrContext';
 import { postReviewComments, type ReviewCommentInput } from './githubPrComments';
 import { getRepositoryRelativePath } from './utils/filePath';
 import { processSegmentsCombined, initializeGeminiService, resetGeminiClient } from './services/gemini';
+import { TranscriptPanelProvider } from './transcriptPanel';
 
-let audioService: AudioService;
+let transcriptPanel: TranscriptPanelProvider;
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -34,11 +33,6 @@ export function activate(context: vscode.ExtensionContext) {
 		return await context.secrets.get(GEMINI_API_KEY_SECRET);
 	});
 
-	// Initialize audio service for diarisation
-	const apiClient = new DiarizationApiClient();
-	audioService = new AudioService(context, apiClient);
-
-
 	// Recording functionality setup
 	let isRecording = false;
 	const contextCollector = new ContextCollector();
@@ -46,21 +40,27 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const commentController = vscode.comments.createCommentController('pr-notes-comments', 'PR Notes');
 
+	// Create transcript panel for sidebar
+	transcriptPanel = new TranscriptPanelProvider(context.extensionUri);
+	context.subscriptions.push(
+		vscode.window.registerWebviewViewProvider(TranscriptPanelProvider.viewType, transcriptPanel)
+	);
+
 	// Create status bar item 
 	const statusBarItem = createStatusBarItem();
 	statusBarItem.command = "pr-notes.showMenu";
 
-	async function refreshStatusBar() {
-		const selectedDeviceId = getSelectedDevice();
-		let deviceDisplayName: string | undefined = undefined;
-
-		if (selectedDeviceId && selectedDeviceId !== 'default') {
-			// Look up device name from the device list
-			const devices = await listAudioDevices();
-			const device = devices.find(d => d.id === selectedDeviceId);
-			deviceDisplayName = device?.name;
+	async function getDeviceDisplayName(): Promise<string | undefined> {
+		const deviceId = getSelectedDevice();
+		if (!deviceId || deviceId === 'default') {
+			return undefined;
 		}
+		const devices = await listAudioDevices();
+		return devices.find(d => d.id === deviceId)?.name;
+	}
 
+	async function refreshStatusBar() {
+		const deviceDisplayName = await getDeviceDisplayName();
 		const authState = await getAuthState();
 		updateStatusBar(statusBarItem, isRecording, deviceDisplayName, authState.accountLabel);
 	}
@@ -69,8 +69,7 @@ export function activate(context: vscode.ExtensionContext) {
 	refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 
 	// Auth: refresh status bar when GitHub sessions change (e.g. sign in/out from Accounts menu)
-	context.subscriptions.push(registerSessionChangeListener());
-	context.subscriptions.push(onSessionChange(() => {
+	context.subscriptions.push(registerSessionChangeListener(() => {
 		refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 	}));
 
@@ -306,17 +305,22 @@ export function activate(context: vscode.ExtensionContext) {
 					console.log('[FluidHelper] Recording started');
 					processedSegmentCount = 0;
 					pendingGitHubComments = [];
+					transcriptPanel.clear();
+					transcriptPanel.setRecording(true);
 				} else if (msg.status === 'stopped') {
 					console.log('[FluidHelper] Recording stopped');
+					transcriptPanel.setRecording(false);
 				} else if (msg.status === 'error') {
 					vscode.window.showErrorMessage(`Recording error: ${msg.error}`);
 					isRecording = false;
+					transcriptPanel.setRecording(false);
 					refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 				}
 				break;
 			case 'volatile':
-				// Real-time interim transcription - show in status bar
+				// Real-time interim transcription - show in status bar and transcript panel
 				statusBarItem.text = `$(pulse) ${truncate(String(msg.text), 30)}`;
+				transcriptPanel.updateVolatile(String(msg.text));
 				break;
 			case 'confirmed':
 				console.log(`[FluidHelper] Confirmed: ${msg.text} (confidence: ${msg.confidence})`);
@@ -325,6 +329,14 @@ export function activate(context: vscode.ExtensionContext) {
 				// REAL-TIME SEGMENT PROCESSING - don't wait for recording to stop!
 				if (msg.isFinal) {
 					console.log(`[FluidHelper] Final segment: Speaker ${msg.speakerId}: "${msg.text}"`);
+					
+					// Update transcript panel
+					transcriptPanel.addSegment({
+						speakerId: msg.speakerId as number,
+						text: msg.text as string,
+						startTime: msg.start as number,
+						endTime: msg.end as number
+					});
 					
 					// Process with Gemini immediately (non-blocking)
 					processSegmentRealTime({
@@ -358,10 +370,14 @@ export function activate(context: vscode.ExtensionContext) {
 			case 'speaker':
 				// Real-time speaker detection
 				console.log(`[FluidHelper] Speaker ${msg.id}: ${msg.start}s - ${msg.end}s`);
+				transcriptPanel.updateCurrentSpeaker(msg.id as number);
 				break;
 			case 'error':
 				console.error(`[FluidHelper] Error: ${msg.message}`);
 				vscode.window.showErrorMessage(`Transcription error: ${msg.message}`);
+				break;
+			case 'debug':
+				console.log(`[FluidHelper] Debug: ${msg.message}`);
 				break;
 		}
 	}
@@ -517,43 +533,9 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	}
 
-	// Register command for processing audio file (diarisation)
-	const processAudioDisposable = vscode.commands.registerCommand('pr-notes.processAudio', async () => {
-		try {
-			const results = await audioService.processAudioFromFile();
-			
-			if (results) {
-				// Show results in a new document
-				const doc = await vscode.workspace.openTextDocument({
-					content: audioService.formatResultsAsText(results),
-					language: 'plaintext'
-				});
-				await vscode.window.showTextDocument(doc);
-				
-				// Also show summary notification
-				vscode.window.showInformationMessage(
-					`Processed audio: ${results.total_speakers} speakers, ${results.segments.length} segments`
-				);
-			}
-		} catch (error) {
-			if (error instanceof Error) {
-				vscode.window.showErrorMessage(`Failed to process audio: ${error.message}`);
-			}
-		}
-	});
-
-
 	// Status bar menu command (recording)
 	const showMenuDisposable = vscode.commands.registerCommand('pr-notes.showMenu', async () => {
-		const selectedDeviceId = getSelectedDevice();
-		let deviceDisplayName: string | undefined = undefined;
-
-		if (selectedDeviceId && selectedDeviceId !== 'default') {
-			const devices = await listAudioDevices();
-			const device = devices.find(d => d.id === selectedDeviceId);
-			deviceDisplayName = device?.name;
-		}
-
+		const deviceDisplayName = await getDeviceDisplayName();
 		const authState = await getAuthState();
 		const callbacks: StatusBarCallbacks = {
 			onStartRecording: handleStartRecording,
@@ -614,7 +596,6 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(statusBarItem);
 	context.subscriptions.push(commentController);
-	context.subscriptions.push(processAudioDisposable);
 	context.subscriptions.push(showMenuDisposable);
 	context.subscriptions.push(loginDisposable);
 	context.subscriptions.push(downloadModelsDisposable);

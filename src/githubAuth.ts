@@ -16,23 +16,6 @@ export interface AuthState {
 
 export type OnSessionChangeCallback = () => void;
 
-let sessionChangeCallback: OnSessionChangeCallback | undefined;
-
-/**
- * Subscribe to session changes (e.g. sign in/out from Accounts menu).
- * The callback is invoked when GitHub sessions change so the UI can refresh.
- */
-export function onSessionChange(callback: OnSessionChangeCallback): vscode.Disposable {
-	sessionChangeCallback = callback;
-	return new vscode.Disposable(() => {
-		sessionChangeCallback = undefined;
-	});
-}
-
-function notifySessionChange(): void {
-	sessionChangeCallback?.();
-}
-
 /**
  * Get the current GitHub session.
  * @param createIfNone - If true, prompts the user to sign in when no session exists.
@@ -59,12 +42,13 @@ export async function getAuthState(): Promise<AuthState> {
 }
 
 /**
- * Register listener for VS Code's onDidChangeSessions and invoke our callback when GitHub sessions change.
+ * Register listener for VS Code's onDidChangeSessions and invoke callback when GitHub sessions change.
+ * Combines registration and callback setup in a single function.
  */
-export function registerSessionChangeListener(): vscode.Disposable {
+export function registerSessionChangeListener(callback: OnSessionChangeCallback): vscode.Disposable {
 	return vscode.authentication.onDidChangeSessions((e) => {
 		if (e.provider.id === GITHUB_PROVIDER_ID) {
-			notifySessionChange();
+			callback();
 		}
 	});
 }
