@@ -5,7 +5,7 @@ node_modules
 
 # Swift build artifacts
 src/fluid-helper/.build/
-bin/fluid-helper
+bin/
 
 # Old server references (removed)
 server/.env
