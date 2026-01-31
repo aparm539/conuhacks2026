@@ -80,6 +80,11 @@ export function activate(context: vscode.ExtensionContext) {
 	let processedSegmentCount = 0;
 	let pendingGitHubComments: ReviewCommentInput[] = [];
 
+	// Batch processing: collect segments and process with Gemini + comment location in one go (500ms debounce)
+	const SEGMENT_BATCH_DEBOUNCE_MS = 500;
+	let pendingSegmentsQueue: SpeakerSegment[] = [];
+	let segmentBatchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
 	// Model download timeout: 15 minutes for first-run downloads (~650MB)
 	const MODEL_DOWNLOAD_TIMEOUT_MS = 900000;
 
@@ -166,14 +171,6 @@ export function activate(context: vscode.ExtensionContext) {
 	let modelDownloadProgress: vscode.Progress<{ message?: string; increment?: number }> | null = null;
 
 	/**
-	 * Truncate text for status bar display
-	 */
-	function truncate(text: string, maxLength: number): string {
-		if (text.length <= maxLength) { return text; }
-		return '...' + text.slice(-maxLength);
-	}
-
-	/**
 	 * Handle messages from fluid-helper
 	 * @param showSuccessMessage - Whether to show a success message when models are ready
 	 */
@@ -205,6 +202,11 @@ export function activate(context: vscode.ExtensionContext) {
 					console.log('[FluidHelper] Recording started');
 					processedSegmentCount = 0;
 					pendingGitHubComments = [];
+					pendingSegmentsQueue = [];
+					if (segmentBatchDebounceTimer !== null) {
+						clearTimeout(segmentBatchDebounceTimer);
+						segmentBatchDebounceTimer = null;
+					}
 					transcriptPanel.clear();
 					transcriptPanel.setRecording(true);
 				} else if (msg.status === 'stopped') {
@@ -218,49 +220,59 @@ export function activate(context: vscode.ExtensionContext) {
 				}
 				break;
 			case 'volatile':
-				// Real-time interim transcription - show in status bar and transcript panel
-				statusBarItem.text = `$(pulse) ${truncate(String(msg.text), 30)}`;
+				// Real-time interim transcription - show in transcript panel only
 				transcriptPanel.updateVolatile(String(msg.text));
 				break;
 			case 'confirmed':
 				console.log(`[FluidHelper] Confirmed: ${msg.text} (confidence: ${msg.confidence})`);
 				break;
 			case 'segment':
-				// REAL-TIME SEGMENT PROCESSING - don't wait for recording to stop!
+				// Batched segment processing: add to queue and process after debounce
 				if (msg.isFinal) {
 					console.log(`[FluidHelper] Final segment: Speaker ${msg.speakerId}: "${msg.text}"`);
-					
-					// Update transcript panel
-					transcriptPanel.addSegment({
-						speakerId: msg.speakerId as number,
-						text: msg.text as string,
-						startTime: msg.start as number,
-						endTime: msg.end as number
-					});
-					
-					// Process with Gemini immediately (non-blocking)
-					processSegmentRealTime({
+					const segment: SpeakerSegment = {
 						speakerTag: msg.speakerId as number,
 						text: msg.text as string,
 						startTime: msg.start as number,
 						endTime: msg.end as number
-					}).catch(err => {
-						console.error('Real-time segment processing failed:', err);
+					};
+					transcriptPanel.addSegment({
+						speakerId: segment.speakerTag,
+						text: segment.text,
+						startTime: segment.startTime,
+						endTime: segment.endTime
 					});
-					
+					pendingSegmentsQueue.push(segment);
 					processedSegmentCount++;
-					statusBarItem.text = `$(pulse) ${processedSegmentCount} segments`;
+
+					if (segmentBatchDebounceTimer !== null) {
+						clearTimeout(segmentBatchDebounceTimer);
+					}
+					segmentBatchDebounceTimer = setTimeout(() => {
+						segmentBatchDebounceTimer = null;
+						flushPendingSegments().catch(err => {
+							console.error('Batch segment processing failed:', err);
+						});
+					}, SEGMENT_BATCH_DEBOUNCE_MS);
 				}
 				break;
 			case 'done':
-				// Recording finished - all segments already processed during recording
+				// Recording finished - flush any pending segment batch, then post GitHub comments
 				console.log(`[FluidHelper] Done: ${msg.totalSegments} segments, ${msg.totalSpeakers} speakers`);
 				isRecording = false;
-				refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
-				
-				// Post GitHub comments now
-				postPendingGitHubComments().catch(err => {
-					console.error('Failed to post GitHub comments:', err);
+				if (segmentBatchDebounceTimer !== null) {
+					clearTimeout(segmentBatchDebounceTimer);
+					segmentBatchDebounceTimer = null;
+				}
+				flushPendingSegments().then(() => {
+					refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
+					postPendingGitHubComments().catch(err => {
+						console.error('Failed to post GitHub comments:', err);
+					});
+				}).catch(err => {
+					console.error('Failed to flush pending segments:', err);
+					refreshStatusBar().catch(() => {});
+					postPendingGitHubComments().catch(e => console.error('Failed to post GitHub comments:', e));
 				});
 				
 				vscode.window.showInformationMessage(
@@ -283,57 +295,46 @@ export function activate(context: vscode.ExtensionContext) {
 	}
 
 	/**
-	 * Process a single segment in real-time during recording
-	 * This runs concurrently - doesn't block the recording flow
+	 * Flush pending segments: take current queue and process in one batch (Gemini + comment locations)
 	 */
-	async function processSegmentRealTime(segment: SpeakerSegment): Promise<void> {
+	async function flushPendingSegments(): Promise<void> {
+		if (pendingSegmentsQueue.length === 0) return;
+		const batch = pendingSegmentsQueue.splice(0);
+		await processSegmentsBatch(batch);
+	}
+
+	/**
+	 * Process multiple segments in one batch: Gemini classify+transform, then find locations and create comments
+	 */
+	async function processSegmentsBatch(segments: SpeakerSegment[]): Promise<void> {
+		if (segments.length === 0) return;
 		const contexts = contextCollector.getCurrentContext();
-		
-		// Process single segment with Gemini (classify + transform)
-		const transformed = await processSegmentsCombined([segment]);
-		
-		if (transformed.length === 0 || transformed[0].classification === 'Ignore') {
-			console.log(`[RealTime] Segment ignored: "${segment.text}"`);
-			return;
-		}
-		
-		const transformedSegment = transformed[0];
-		
-		// Find location and create comment immediately
 		const editor = vscode.window.activeTextEditor;
-		if (!editor) { return; }
-		
+		if (!editor) return;
 		const document = editor.document;
-		const currentFile = getRepositoryRelativePath(document.uri);
-		
-		// Find comment location
-		const ranges = await findCommentLocationsBatch(
-			[transformedSegment],
-			contexts,
-			document,
-			currentFile || ''
-		);
-		
-		const range = ranges[0];
-		const commentText = transformedSegment.transformedText;
-		
-		// Create VS Code comment thread
-		const comment: vscode.Comment = {
-			body: new vscode.MarkdownString(commentText),
-			mode: vscode.CommentMode.Preview,
-			author: { name: 'PR Notes' }
-		};
-		
-		commentController.createCommentThread(document.uri, range, [comment]);
-		
-		// Queue for GitHub posting (batched at end)
-		pendingGitHubComments.push({
-			path: currentFile ?? '',
-			line: range.start.line + 1,
-			body: commentText
-		});
-		
-		console.log(`[RealTime] Created comment: "${commentText.slice(0, 50)}..."`);
+		const currentFile = getRepositoryRelativePath(document.uri) ?? '';
+
+		const transformed = await processSegmentsCombined(segments);
+		const toComment = transformed.filter(t => t.classification !== 'Ignore' && t.transformedText.trim().length > 0);
+		if (toComment.length === 0) return;
+
+		const ranges = await findCommentLocationsBatch(toComment, contexts, document, currentFile);
+		for (let i = 0; i < toComment.length; i++) {
+			const transformedSegment = toComment[i];
+			const commentText = transformedSegment.transformedText;
+			const range = ranges[i];
+			commentController.createCommentThread(document.uri, range, [{
+				body: new vscode.MarkdownString(commentText),
+				mode: vscode.CommentMode.Preview,
+				author: { name: 'PR Notes' }
+			}]);
+			pendingGitHubComments.push({
+				path: currentFile,
+				line: range.start.line + 1,
+				body: commentText
+			});
+			console.log(`[Batch] Created comment: "${commentText.slice(0, 50)}..."`);
+		}
 	}
 
 	/**
