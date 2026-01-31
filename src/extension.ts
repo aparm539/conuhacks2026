@@ -260,18 +260,17 @@ export function activate(context: vscode.ExtensionContext) {
 				// Recording finished - flush any pending segment batch, then post GitHub comments
 				console.log(`[FluidHelper] Done: ${msg.totalSegments} segments, ${msg.totalSpeakers} speakers`);
 				isRecording = false;
+				refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 				if (segmentBatchDebounceTimer !== null) {
 					clearTimeout(segmentBatchDebounceTimer);
 					segmentBatchDebounceTimer = null;
 				}
 				flushPendingSegments().then(() => {
-					refreshStatusBar().catch(err => console.error('Error refreshing status bar:', err));
 					postPendingGitHubComments().catch(err => {
 						console.error('Failed to post GitHub comments:', err);
 					});
 				}).catch(err => {
 					console.error('Failed to flush pending segments:', err);
-					refreshStatusBar().catch(() => {});
 					postPendingGitHubComments().catch(e => console.error('Failed to post GitHub comments:', e));
 				});
 				
