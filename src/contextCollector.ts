@@ -61,6 +61,14 @@ export class ContextCollector {
 		return snapshots;
 	}
 
+	/**
+	 * Get current context snapshots without stopping recording
+	 * Used for real-time segment processing during recording
+	 */
+	getCurrentContext(): RecordingContext[] {
+		return [...this.contextSnapshots];
+	}
+
 	clear(): void {
 		this.recordingStartTime = null;
 		this.contextSnapshots = [];

@@ -9,24 +9,12 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      {
-        "command": "pr-notes.helloWorld",
-        "title": "Hello World"
-      },
-      {
-        "command": "pr-notes.processAudio",
-        "title": "Process Audio for Speaker Diarization",
-        "category": "PR Notes"
-      },
-      {
-        "command": "pr-notes.checkHealth",
-        "title": "Check Diarization Service Health",
-        "category": "PR Notes"
-      },
       {
         "command": "pr-notes.showMenu",
         "title": "Show Recording Menu",
@@ -44,21 +32,39 @@
         "command": "pr-notes.login",
         "title": "Sign in with GitHub",
         "category": "PR Notes"
+      },
+      {
+        "command": "pr-notes.downloadModels",
+        "title": "Download Speech Models",
+        "category": "PR Notes"
+      },
+      {
+        "command": "pr-notes.setGeminiApiKey",
+        "title": "Set Gemini API Key",
+        "category": "PR Notes"
       }
     ],
+"viewsContainers": {
+      "activitybar": [
+        {
+          "id": "pr-notes",
+          "title": "PR Notes",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "pr-notes": [
+        {
+          "type": "webview",
+          "id": "pr-notes.transcriptPanel",
+          "name": "Live Transcript"
+        }
+      ]
+    },
     "configuration": {
       "title": "PR Notes",
       "properties": {
-        "pr-notes.apiUrl": {
-          "type": "string",
-          "default": "http://localhost:8000",
-          "description": "Base URL for the speaker diarization API service"
-        },
-        "pr-notes.timeout": {
-          "type": "number",
-          "default": 300000,
-          "description": "Timeout for API requests in milliseconds (default: 5 minutes)"
-        },
         "pr-notes.inputDevice": {
           "type": "string",
           "default": "default",
@@ -88,7 +94,8 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "pnpm run compile",
+    "build:helper": "./scripts/build-helper.sh",
+    "vscode:prepublish": "pnpm run build:helper && pnpm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "pnpm run compile && pnpm run lint",
@@ -106,6 +113,6 @@
     "typescript-eslint": "^8.52.0"
   },
   "dependencies": {
-    "node-audiorecorder": "^3.0.0"
+    "@google/generative-ai": "^0.21.0"
   }
 }

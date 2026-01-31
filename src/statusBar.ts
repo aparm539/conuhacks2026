@@ -1,9 +1,7 @@
 import * as vscode from 'vscode';
+import type { AuthState } from './githubAuth';
 
-export interface AuthState {
-	loggedIn: boolean;
-	accountLabel?: string;
-}
+export type { AuthState };
 
 export interface StatusBarCallbacks {
 	onStartRecording: () => void;
@@ -80,6 +78,18 @@ export async function showStatusBarMenu(
 		description: "Choose a different audio input device"
 	});
 
+	// Add download models option
+	items.push({
+		label: "$(cloud-download) Download Speech Models",
+		description: "Pre-download ~650MB of speech recognition models"
+	});
+
+	// Add API key option
+	items.push({
+		label: "$(key) Set Gemini API Key",
+		description: "Configure API key for speech processing"
+	});
+
 	// Auth section
 	items.push({
 		label: "",
@@ -113,6 +123,12 @@ export async function showStatusBarMenu(
 		callbacks.onStopRecording();
 	} else if (selected.label.includes("Current Device") || selected.label.includes("Select Input Device")) {
 		await callbacks.onSelectDevice();
+	} else if (selected.label.includes("Download Speech Models")) {
+		// Trigger the download models command
+		await vscode.commands.executeCommand('pr-notes.downloadModels');
+	} else if (selected.label.includes("Set Gemini API Key")) {
+		// Trigger the set API key command
+		await vscode.commands.executeCommand('pr-notes.setGeminiApiKey');
 	} else if (selected.label.includes("Sign in with GitHub") && callbacks.onLogin) {
 		await callbacks.onLogin();
 	}

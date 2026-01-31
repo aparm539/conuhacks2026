@@ -1,122 +1,60 @@
 import * as vscode from 'vscode';
 import { RecordingContext } from './contextCollector';
-
-export interface WordInfo {
-	word: string;
-	speakerTag: number;
-	startOffset: string;
-	endOffset: string;
-}
-
-export interface SpeakerSegment {
-	speakerTag: number;
-	text: string;
-	startTime: number;
-	endTime: number;
-}
-
-export type SegmentClassification = 'Ignore' | 'Question' | 'Concern' | 'Suggestion' | 'Style';
-
-export interface ClassifiedSegment extends SpeakerSegment {
-	classification: SegmentClassification;
-}
-
-export interface TransformedSegment extends ClassifiedSegment {
-	transformedText: string;
-}
+import { selectCommentLocationsBatch } from './services/gemini';
+import type { CandidateLocation, TransformedSegment } from './types';
 
 /**
- * Parse timestamp string (e.g., "1.100s") to seconds as a float
+ * Find a symbol by name recursively in a symbol hierarchy
  */
-export function parseTimestamp(offset: string): number {
-	// Remove 's' suffix if present
-	const cleaned = offset.replace(/s$/, '');
-	return parseFloat(cleaned) || 0;
-}
-
-/**
- * Group words into speaker segments based on speaker tags
- */
-export function groupWordsBySpeaker(words: WordInfo[]): SpeakerSegment[] {
-	if (words.length === 0) {
-		return [];
-	}
-
-	const segments: SpeakerSegment[] = [];
-	let currentSegment: SpeakerSegment | null = null;
-
-	for (const wordInfo of words) {
-		const startTime = parseTimestamp(wordInfo.startOffset);
-		const endTime = parseTimestamp(wordInfo.endOffset);
-
-		// Start new segment if speaker changed or no current segment
-		if (!currentSegment || currentSegment.speakerTag !== wordInfo.speakerTag) {
-			// Save previous segment if exists
-			if (currentSegment) {
-				segments.push(currentSegment);
+function findSymbolByName(
+	symbols: vscode.DocumentSymbol[],
+	name: string
+): vscode.DocumentSymbol | null {
+	for (const symbol of symbols) {
+		if (symbol.name === name) {
+			return symbol;
+		}
+		if (symbol.children && symbol.children.length > 0) {
+			const found = findSymbolByName(symbol.children, name);
+			if (found) {
+				return found;
 			}
-
-			// Create new segment
-			currentSegment = {
-				speakerTag: wordInfo.speakerTag,
-				text: wordInfo.word,
-				startTime: startTime,
-				endTime: endTime
-			};
-		} else {
-			// Continue current segment
-			currentSegment.text += ' ' + wordInfo.word;
-			currentSegment.endTime = endTime; // Update end time to latest word
 		}
 	}
-
-	// Don't forget the last segment
-	if (currentSegment) {
-		segments.push(currentSegment);
-	}
-
-	return segments;
+	return null;
 }
 
 /**
- * Find the context snapshot with the closest timestamp to the given time
- * Prefers contexts matching the current file if provided
+ * Create a range for a specific line in a document
  */
-export function findNearestContext(
-	timestamp: number,
-	contexts: RecordingContext[],
-	currentFile?: string
-): RecordingContext | null {
-	if (contexts.length === 0) {
-		return null;
-	}
-
-	// Filter contexts matching current file if provided
-	let candidates = contexts;
-	if (currentFile) {
-		const matchingFile = contexts.filter(ctx => ctx.file === currentFile);
-		if (matchingFile.length > 0) {
-			candidates = matchingFile;
-		} else {
-			// Log warning but use all contexts
-			console.warn(`No context snapshots found for file ${currentFile}, using any available context`);
-		}
-	}
-
-	// Find context with minimum absolute time difference
-	let nearest: RecordingContext = candidates[0];
-	let minDiff = Math.abs(candidates[0].timestamp - timestamp);
-
-	for (const context of candidates) {
-		const diff = Math.abs(context.timestamp - timestamp);
-		if (diff < minDiff) {
-			minDiff = diff;
-			nearest = context;
-		}
-	}
-
-	return nearest;
+function createLineRange(document: vscode.TextDocument, lineNumber: number): vscode.Range {
+	const line = document.lineAt(lineNumber);
+	return new vscode.Range(lineNumber, 0, lineNumber, line.text.length);
 }
+
+/**
+ * Create a fallback range at the start of the document
+ */
+function createFileLevelFallbackRange(document: vscode.TextDocument): vscode.Range {
+	const firstLine = document.lineAt(0);
+	return new vscode.Range(0, 0, 0, firstLine.text.length);
+}
+
+/**
+ * Filter contexts by file, with fallback to all contexts if no matches
+ */
+function filterContextsByFile(contexts: RecordingContext[], currentFile?: string): RecordingContext[] {
+	if (!currentFile) {
+		return contexts;
+	}
+	const matchingFile = contexts.filter(ctx => ctx.file === currentFile);
+	if (matchingFile.length > 0) {
+		return matchingFile;
+	}
+	console.warn(`No context snapshots found for file ${currentFile}, using any available context`);
+	return contexts;
+}
+
 
 /**
  * Find the top N nearest contexts by timestamp
@@ -132,17 +70,7 @@ export function findNearestContexts(
 		return [];
 	}
 
-	// Filter contexts matching current file if provided
-	let candidates = contexts;
-	if (currentFile) {
-		const matchingFile = contexts.filter(ctx => ctx.file === currentFile);
-		if (matchingFile.length > 0) {
-			candidates = matchingFile;
-		} else {
-			// Log warning but use all contexts
-			console.warn(`No context snapshots found for file ${currentFile}, using any available context`);
-		}
-	}
+	const candidates = filterContextsByFile(contexts, currentFile);
 
 	// Sort by absolute time difference
 	const sorted = [...candidates].sort((a, b) => {
@@ -165,25 +93,6 @@ export async function extractCodeContext(
 ): Promise<string> {
 	const lineCount = document.lineCount;
 	const codeSnippets: string[] = [];
-
-	// Helper to find symbol by name recursively
-	const findSymbolByName = (
-		symbols: vscode.DocumentSymbol[],
-		name: string
-	): vscode.DocumentSymbol | null => {
-		for (const symbol of symbols) {
-			if (symbol.name === name) {
-				return symbol;
-			}
-			if (symbol.children && symbol.children.length > 0) {
-				const found = findSymbolByName(symbol.children, name);
-				if (found) {
-					return found;
-				}
-			}
-		}
-		return null;
-	};
 
 	// Try to extract code around visible symbols
 	if (context.symbolsInView && context.symbolsInView.length > 0) {
@@ -257,211 +166,14 @@ export async function extractCodeContext(
 }
 
 /**
- * Find the best location for a comment using Gemini API
- * Falls back to heuristic if Gemini fails
- */
-export async function findCommentLocation(
-	segment: TransformedSegment,
-	contexts: RecordingContext[],
-	document: vscode.TextDocument,
-	currentFile: string,
-	serverUrl: string = 'http://localhost:3000'
-): Promise<vscode.Range> {
-	const lineCount = document.lineCount;
-
-	// Get top 5 candidate contexts
-	const candidateContexts = findNearestContexts(segment.startTime, contexts, 5, currentFile);
-
-	if (candidateContexts.length === 0) {
-		// Fallback: use file-level
-		const firstLine = document.lineAt(0);
-		return new vscode.Range(0, 0, 0, firstLine.text.length);
-	}
-
-	// Extract code context for each candidate
-	const candidates = await Promise.all(
-		candidateContexts.map(async (context) => {
-			const codeContext = await extractCodeContext(context, document);
-			return {
-				timestamp: context.timestamp,
-				file: context.file,
-				cursorLine: context.cursorLine,
-				visibleRange: context.visibleRange,
-				symbolsInView: context.symbolsInView,
-				codeContext: codeContext
-			};
-		})
-	);
-
-	// Try to use Gemini API for location selection
-	try {
-		const response = await fetch(`${serverUrl}/select-comment-location`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				commentText: segment.transformedText,
-				classification: segment.classification,
-				candidates: candidates,
-				fileName: currentFile,
-			}),
-		});
-
-		if (response.ok) {
-			const data = await response.json() as { selectedIndex: number; rationale?: string };
-			
-			if (typeof data.selectedIndex === 'number' && 
-			    data.selectedIndex >= 0 && 
-			    data.selectedIndex < candidates.length) {
-				const selectedCandidate = candidateContexts[data.selectedIndex];
-				
-				// Convert to range - prefer cursor line, then first visible symbol
-				if (selectedCandidate.cursorLine >= 0 && selectedCandidate.cursorLine < lineCount) {
-					const line = document.lineAt(selectedCandidate.cursorLine);
-					return new vscode.Range(
-						selectedCandidate.cursorLine,
-						0,
-						selectedCandidate.cursorLine,
-						line.text.length
-					);
-				}
-
-				// Try visible symbols
-				if (selectedCandidate.symbolsInView && selectedCandidate.symbolsInView.length > 0) {
-					try {
-						const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-							'vscode.executeDocumentSymbolProvider',
-							document.uri
-						);
-
-						if (symbols && Array.isArray(symbols)) {
-							const findSymbolByName = (
-								symbols: vscode.DocumentSymbol[],
-								name: string
-							): vscode.DocumentSymbol | null => {
-								for (const symbol of symbols) {
-									if (symbol.name === name) {
-										return symbol;
-									}
-									if (symbol.children && symbol.children.length > 0) {
-										const found = findSymbolByName(symbol.children, name);
-										if (found) {
-											return found;
-										}
-									}
-								}
-								return null;
-							};
-
-							for (const symbolName of selectedCandidate.symbolsInView) {
-								const symbol = findSymbolByName(symbols, symbolName);
-								if (symbol) {
-									const line = document.lineAt(symbol.range.start.line);
-									return new vscode.Range(
-										symbol.range.start.line,
-										0,
-										symbol.range.start.line,
-										line.text.length
-									);
-								}
-							}
-						}
-					} catch (error) {
-						console.warn('Failed to query document symbols for comment placement:', error);
-					}
-				}
-
-				// Fallback to visible range start
-				if (selectedCandidate.visibleRange[0] >= 0 && selectedCandidate.visibleRange[0] < lineCount) {
-					const line = document.lineAt(selectedCandidate.visibleRange[0]);
-					return new vscode.Range(
-						selectedCandidate.visibleRange[0],
-						0,
-						selectedCandidate.visibleRange[0],
-						line.text.length
-					);
-				}
-			}
-		}
-	} catch (error) {
-		console.warn('Failed to use Gemini for location selection, falling back to heuristic:', error);
-	}
-
-	// Fallback to heuristic: use first candidate (nearest context)
-	const fallbackContext = candidateContexts[0];
-	
-	// 1. Try cursor line
-	if (fallbackContext.cursorLine >= 0 && fallbackContext.cursorLine < lineCount) {
-		const line = document.lineAt(fallbackContext.cursorLine);
-		return new vscode.Range(
-			fallbackContext.cursorLine,
-			0,
-			fallbackContext.cursorLine,
-			line.text.length
-		);
-	}
-
-	// 2. Try visible symbols
-	if (fallbackContext.symbolsInView && fallbackContext.symbolsInView.length > 0) {
-		try {
-			const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-				'vscode.executeDocumentSymbolProvider',
-				document.uri
-			);
-
-			if (symbols && Array.isArray(symbols)) {
-				const findSymbolByName = (
-					symbols: vscode.DocumentSymbol[],
-					name: string
-				): vscode.DocumentSymbol | null => {
-					for (const symbol of symbols) {
-						if (symbol.name === name) {
-							return symbol;
-						}
-						if (symbol.children && symbol.children.length > 0) {
-							const found = findSymbolByName(symbol.children, name);
-							if (found) {
-								return found;
-							}
-						}
-					}
-					return null;
-				};
-
-				for (const symbolName of fallbackContext.symbolsInView) {
-					const symbol = findSymbolByName(symbols, symbolName);
-					if (symbol) {
-						const line = document.lineAt(symbol.range.start.line);
-						return new vscode.Range(
-							symbol.range.start.line,
-							0,
-							symbol.range.start.line,
-							line.text.length
-						);
-					}
-				}
-			}
-		} catch (error) {
-			console.warn('Failed to query document symbols for comment placement:', error);
-		}
-	}
-
-	// 3. File-level fallback (line 0)
-	const firstLine = document.lineAt(0);
-	return new vscode.Range(0, 0, 0, firstLine.text.length);
-}
-
-/**
- * Find the best locations for multiple comments using batch API
+ * Find the best locations for multiple comments using Gemini API
  * Returns an array of ranges corresponding to each segment
  */
 export async function findCommentLocationsBatch(
 	segments: TransformedSegment[],
 	contexts: RecordingContext[],
 	document: vscode.TextDocument,
-	currentFile: string,
-	serverUrl: string = 'http://localhost:3000'
+	currentFile: string
 ): Promise<vscode.Range[]> {
 	const lineCount = document.lineCount;
 
@@ -471,7 +183,7 @@ export async function findCommentLocationsBatch(
 	);
 
 	// Extract code context for all candidates in parallel
-	const allCandidates = await Promise.all(
+	const allCandidates: CandidateLocation[][] = await Promise.all(
 		allCandidateContexts.map(async (candidateContexts) => {
 			if (candidateContexts.length === 0) {
 				return [];
@@ -483,7 +195,7 @@ export async function findCommentLocationsBatch(
 						timestamp: context.timestamp,
 						file: context.file,
 						cursorLine: context.cursorLine,
-						visibleRange: context.visibleRange,
+						visibleRange: context.visibleRange as [number, number],
 						symbolsInView: context.symbolsInView,
 						codeContext: codeContext
 					};
@@ -500,52 +212,29 @@ export async function findCommentLocationsBatch(
 		fileName: currentFile
 	}));
 
-	// Call batch API
+	// Call local Gemini service directly
 	try {
-		const response = await fetch(`${serverUrl}/select-comment-locations`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				segments: batchSegments,
-				candidates: allCandidates,
-			}),
-		});
-
-		if (!response.ok) {
-			throw new Error(`HTTP error! status: ${response.status}`);
-		}
-
-		const data = await response.json() as { locations: Array<{ selectedIndex: number; rationale?: string }> };
+		const locations = await selectCommentLocationsBatch(batchSegments, allCandidates);
 		
-		if (!data.locations || !Array.isArray(data.locations) || data.locations.length !== segments.length) {
-			throw new Error(`Invalid response: expected ${segments.length} locations, got ${data.locations?.length || 0}`);
+		if (locations.length !== segments.length) {
+			throw new Error(`Invalid response: expected ${segments.length} locations, got ${locations.length}`);
 		}
 
 		// Convert selected indices to ranges
 		const ranges: vscode.Range[] = [];
 		for (let i = 0; i < segments.length; i++) {
-			const location = data.locations[i];
+			const location = locations[i];
 			const candidateContexts = allCandidateContexts[i];
 			const selectedCandidate = candidateContexts[location.selectedIndex];
 
 			if (!selectedCandidate) {
-				// Fallback to file-level
-				const firstLine = document.lineAt(0);
-				ranges.push(new vscode.Range(0, 0, 0, firstLine.text.length));
+				ranges.push(createFileLevelFallbackRange(document));
 				continue;
 			}
 
 			// Convert to range - prefer cursor line, then visible symbols, then visible range
 			if (selectedCandidate.cursorLine >= 0 && selectedCandidate.cursorLine < lineCount) {
-				const line = document.lineAt(selectedCandidate.cursorLine);
-				ranges.push(new vscode.Range(
-					selectedCandidate.cursorLine,
-					0,
-					selectedCandidate.cursorLine,
-					line.text.length
-				));
+				ranges.push(createLineRange(document, selectedCandidate.cursorLine));
 				continue;
 			}
 
@@ -558,39 +247,17 @@ export async function findCommentLocationsBatch(
 					);
 
 					if (symbols && Array.isArray(symbols)) {
-						const findSymbolByName = (
-							symbols: vscode.DocumentSymbol[],
-							name: string
-						): vscode.DocumentSymbol | null => {
-							for (const symbol of symbols) {
-								if (symbol.name === name) {
-									return symbol;
-								}
-								if (symbol.children && symbol.children.length > 0) {
-									const found = findSymbolByName(symbol.children, name);
-									if (found) {
-										return found;
-									}
-								}
-							}
-							return null;
-						};
-
+						let foundSymbol = false;
 						for (const symbolName of selectedCandidate.symbolsInView) {
 							const symbol = findSymbolByName(symbols, symbolName);
 							if (symbol) {
-								const line = document.lineAt(symbol.range.start.line);
-								ranges.push(new vscode.Range(
-									symbol.range.start.line,
-									0,
-									symbol.range.start.line,
-									line.text.length
-								));
+								ranges.push(createLineRange(document, symbol.range.start.line));
+								foundSymbol = true;
 								break;
 							}
 						}
-						if (ranges.length === i + 1) {
-							continue; // Found a symbol, move to next segment
+						if (foundSymbol) {
+							continue;
 						}
 					}
 				} catch (error) {
@@ -600,29 +267,26 @@ export async function findCommentLocationsBatch(
 
 			// Fallback to visible range start
 			if (selectedCandidate.visibleRange[0] >= 0 && selectedCandidate.visibleRange[0] < lineCount) {
-				const line = document.lineAt(selectedCandidate.visibleRange[0]);
-				ranges.push(new vscode.Range(
-					selectedCandidate.visibleRange[0],
-					0,
-					selectedCandidate.visibleRange[0],
-					line.text.length
-				));
+				ranges.push(createLineRange(document, selectedCandidate.visibleRange[0]));
 				continue;
 			}
 
 			// Final fallback: file-level
-			const firstLine = document.lineAt(0);
-			ranges.push(new vscode.Range(0, 0, 0, firstLine.text.length));
+			ranges.push(createFileLevelFallbackRange(document));
 		}
 
 		return ranges;
 	} catch (error) {
-		console.warn('Failed to use batch API for location selection, falling back to individual calls:', error);
-		// Fallback to individual calls
+		console.warn('Failed to use Gemini for location selection, falling back to simple location:', error);
+		// Fallback: use cursor line from nearest context
 		const ranges: vscode.Range[] = [];
 		for (const segment of segments) {
-			const range = await findCommentLocation(segment, contexts, document, currentFile, serverUrl);
-			ranges.push(range);
+			const nearestContexts = findNearestContexts(segment.startTime, contexts, 1, currentFile);
+			if (nearestContexts.length > 0 && nearestContexts[0].cursorLine >= 0 && nearestContexts[0].cursorLine < lineCount) {
+				ranges.push(createLineRange(document, nearestContexts[0].cursorLine));
+			} else {
+				ranges.push(createFileLevelFallbackRange(document));
+			}
 		}
 		return ranges;
 	}

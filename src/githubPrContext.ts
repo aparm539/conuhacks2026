@@ -4,8 +4,7 @@
  */
 import * as vscode from 'vscode';
 import { execSync } from 'child_process';
-
-const GITHUB_API = 'https://api.github.com';
+import { GITHUB_API } from './githubAuth';
 
 export interface PrContext {
 	owner: string;
