@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-PR Notes records voice during code review, transcribes and diarizes speech via a native helper process (fluid-helper), classifies and transforms segments with the Gemini API, aligns each comment to editor context using timestamps and visible code, and optionally posts them as GitHub PR review comments. Data flows from user actions (status bar, recording) through the Fluid helper (JSON over stdout), the extension’s segment queue, Gemini (classify/transform and location selection), and finally to in-editor comment threads and the GitHub REST API.
+PR Notes records voice during code review, transcribes and diarizes speech via a native helper process (fluid-helper), chunks the transcript by meaning (semantic chunking), classifies and transforms each chunk with the Gemini API, aligns each comment to editor context using timestamps and visible code, and optionally posts them as GitHub PR review comments. Data flows from user actions (status bar, recording) through the Fluid helper (JSON over stdout), the extension’s segment queue, semantic chunking (split → embed → merge), Gemini (classify/transform and location selection), and finally to in-editor comment threads and the GitHub REST API. Each resulting chunk corresponds to one reviewable issue or suggestion and is used to generate one PR comment.
 
 ---
 
@@ -90,13 +90,14 @@ flowchart LR
 - Final segments are queued in **`pendingSegmentsQueue`** and flushed after a **500 ms** debounce ([src/extension.ts](src/extension.ts) `flushPendingSegments`).
 
 - **`processSegmentsBatch(segments)`**:
-  1. Gets **context** from `contextCollector.getCurrentContext()` and the **active editor** and **current file** (repo-relative path).
-  2. Calls [src/services/gemini.ts](src/services/gemini.ts) **`processSegmentsCombined(segments)`** → **TransformedSegment[]** (classify, split, and transform in one Gemini call). Filters out segments with classification `Ignore` or empty `transformedText` → **toComment**.
-  3. Calls [src/speechAlignment.ts](src/speechAlignment.ts) **`findCommentLocationsBatch(toComment, contexts, document, currentFile)`**:
+  1. **Semantic chunking**: Calls [src/semanticChunking.ts](src/semanticChunking.ts) **`chunkTranscript(segments, { previousTail: semanticChunkingTail })`** → **`{ chunks, pendingTail }`**. Segments are split into sentence-level units; the previous batch’s last chunk (pending tail) is prepended so chunks can span batches. Units are embedded via [src/services/gemini.ts](src/services/gemini.ts) `embedTexts` (model `gemini-embedding-001`), and adjacent units with high cosine similarity are merged. All merged chunks **except the last** are returned in `chunks`; the last is kept as **pending tail** for the next batch. Each chunk corresponds to one reviewable issue or suggestion. See [docs/SEMANTIC_CHUNKING.md](SEMANTIC_CHUNKING.md) for design details.
+  2. Gets **context** from `contextCollector.getCurrentContext()` and the **active editor** and **current file** (repo-relative path).
+  3. Calls [src/services/gemini.ts](src/services/gemini.ts) **`processSegmentsCombined(chunks)`** → **TransformedSegment[]** (classify, split, and transform in one Gemini call). Filters out segments with classification `Ignore` or empty `transformedText` → **toComment**.
+  4. Calls [src/speechAlignment.ts](src/speechAlignment.ts) **`findCommentLocationsBatch(toComment, contexts, document, currentFile)`**:
      - For each segment, **findNearestContexts**(segment startTime, contexts, 5, currentFile) → candidate **RecordingContext**s.
      - For each candidate, **extractCodeContext**(context, document) → code snippet; build **CandidateLocation** (timestamp, file, cursorLine, visibleRange, symbolsInView, codeContext).
      - [src/services/gemini.ts](src/services/gemini.ts) **`selectCommentLocationsBatch`**(batchSegments, allCandidates) → **LocationSelection[]** (selectedIndex per segment) → mapped to **vscode.Range[]**.
-  4. For each segment: create an in-editor comment thread via the comment controller and append **{ path, line, body }** to **`pendingGitHubComments`**.
+  5. For each segment: create an in-editor comment thread via the comment controller and append **{ path, line, body }** to **`pendingGitHubComments`**.
 
 ---
 
@@ -105,12 +106,13 @@ flowchart LR
 - Fluid helper sends **`done`** (with totalSegments, totalSpeakers).
 - Extension:
   1. Clears the segment debounce timer, sets `isRecording = false`, refreshes status bar.
-  2. **`flushPendingSegments()`** to process any remaining queue.
-  3. **`postPendingGitHubComments()`**:
+  2. **`flushPendingSegments()`** to process any remaining queue (updates semantic chunking tail).
+  3. **Flush semantic chunking tail**: If `semanticChunkingTail` is non-null, calls `chunkTranscript([], { previousTail, flushTail: true })` and runs the returned chunk(s) through the pipeline (Gemini, locations, comments), then clears the tail.
+  4. **`postPendingGitHubComments()`**:
      - If `postToGitHub` config is false or no session or no PR context, clears `pendingGitHubComments` and returns.
      - [src/githubPrContext.ts](src/githubPrContext.ts) **`getPrContext(accessToken)`** resolves **owner**, **repo**, **pull number**, and **commitId** (from Git API / CLI and optional config overrides).
      - [src/githubPrComments.ts](src/githubPrComments.ts) **`postReviewComments(pendingGitHubComments, prContext, token)`** → GitHub REST API `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` with `commit_id`, `event: "COMMENT"`, and the comment bodies/lines/paths.
-  4. Clears **`pendingGitHubComments`**.
+  5. Clears **`pendingGitHubComments`**.
 
 ---
 
@@ -119,6 +121,8 @@ flowchart LR
 | Type | File | Description |
 |------|------|-------------|
 | **SpeakerSegment** | [src/types.ts](src/types.ts) | `speakerTag`, `text`, `startTime`, `endTime` |
+| **TranscriptUnit** | [src/types.ts](src/types.ts) | One sentence/phrase with `text`, `startTime`, `endTime`, `speakerTag` (used in semantic chunking) |
+| **SemanticChunkingTail** | [src/types.ts](src/types.ts) | Pending tail: `units: TranscriptUnit[]`, `embeddings: number[][]` (cross-batch state) |
 | **ClassifiedSegment** | [src/types.ts](src/types.ts) | SpeakerSegment + `classification` |
 | **TransformedSegment** | [src/types.ts](src/types.ts) | ClassifiedSegment + `transformedText` |
 | **CandidateLocation** | [src/types.ts](src/types.ts) | `timestamp`, `file`, `cursorLine`, `visibleRange`, `symbolsInView`, `codeContext` |
@@ -135,6 +139,7 @@ flowchart LR
 sequenceDiagram
   participant FH as FluidHelper
   participant Ext as Extension
+  participant Chunk as SemanticChunking
   participant CC as ContextCollector
   participant Gem as GeminiService
   participant SA as SpeechAlignment
@@ -142,6 +147,10 @@ sequenceDiagram
 
   FH->>Ext: segment (isFinal)
   Ext->>Ext: queue + debounce
+  Ext->>Chunk: chunkTranscript(segments, previousTail)
+  Chunk->>Gem: embedTexts (new units)
+  Gem-->>Chunk: embedding vectors
+  Chunk-->>Ext: chunks (all but last), pendingTail
   Ext->>CC: getCurrentContext
   Ext->>Gem: processSegmentsCombined
   Gem-->>Ext: TransformedSegment[]
@@ -154,7 +163,9 @@ sequenceDiagram
   Note over FH,GH: On "done"
   FH->>Ext: done
   Ext->>Ext: flushPendingSegments
-  Ext->>Ext: postPendingGitHubComments
+  Ext->>Chunk: chunkTranscript([], previousTail, flushTail true)
+  Chunk-->>Ext: chunks = [tail as one segment]
+  Ext->>Ext: processChunksToComments then postPendingGitHubComments
   Ext->>GH: getPrContext then postReviewComments
   GH-->>Ext: success / error
 ```

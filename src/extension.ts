@@ -23,7 +23,7 @@ import {
 } from "./audioDeviceManager";
 import { ContextCollector } from "./contextCollector";
 import { findCommentLocationsBatch } from "./speechAlignment";
-import type { SpeakerSegment, TransformedSegment } from "./types";
+import type { SpeakerSegment, TransformedSegment, SemanticChunkingTail } from "./types";
 import { getPrContext } from "./githubPrContext";
 import {
   postReviewComments,
@@ -35,6 +35,7 @@ import {
   initializeGeminiService,
   resetGeminiClient,
 } from "./services/gemini";
+import { chunkTranscript } from "./semanticChunking";
 import { TranscriptPanelProvider } from "./transcriptPanel";
 
 let transcriptPanel: TranscriptPanelProvider;
@@ -120,6 +121,9 @@ export function activate(context: vscode.ExtensionContext) {
   const SEGMENT_BATCH_DEBOUNCE_MS = 500;
   let pendingSegmentsQueue: SpeakerSegment[] = [];
   let segmentBatchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Cross-batch semantic chunking: last chunk's units + embeddings, cleared on recording start
+  let semanticChunkingTail: SemanticChunkingTail | null = null;
 
   // Model download timeout: 15 minutes for first-run downloads (~650MB)
   const MODEL_DOWNLOAD_TIMEOUT_MS = 900000;
@@ -267,6 +271,7 @@ export function activate(context: vscode.ExtensionContext) {
           processedSegmentCount = 0;
           pendingGitHubComments = [];
           pendingSegmentsQueue = [];
+          semanticChunkingTail = null;
           if (segmentBatchDebounceTimer !== null) {
             clearTimeout(segmentBatchDebounceTimer);
             segmentBatchDebounceTimer = null;
@@ -340,8 +345,18 @@ export function activate(context: vscode.ExtensionContext) {
           segmentBatchDebounceTimer = null;
         }
         flushPendingSegments()
-          .then(() => {
-            postPendingGitHubComments().catch((err) => {
+          .then(async () => {
+            if (semanticChunkingTail !== null) {
+              const tailResult = await chunkTranscript([], {
+                previousTail: semanticChunkingTail,
+                flushTail: true,
+              });
+              semanticChunkingTail = null;
+              if (tailResult.chunks.length > 0) {
+                await processChunksToComments(tailResult.chunks);
+              }
+            }
+            await postPendingGitHubComments().catch((err) => {
               console.error("Failed to post GitHub comments:", err);
             });
           })
@@ -385,12 +400,10 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   /**
-   * Process multiple segments in one batch: Gemini classify+transform, then find locations and create comments
+   * Run chunks through Gemini classify+transform, find locations, create comment threads and pending GitHub comments.
    */
-  async function processSegmentsBatch(
-    segments: SpeakerSegment[],
-  ): Promise<void> {
-    if (segments.length === 0) {
+  async function processChunksToComments(chunks: SpeakerSegment[]): Promise<void> {
+    if (chunks.length === 0) {
       return;
     }
     const contexts = contextCollector.getCurrentContext();
@@ -401,7 +414,7 @@ export function activate(context: vscode.ExtensionContext) {
     const document = editor.document;
     const currentFile = getRepositoryRelativePath(document.uri) ?? "";
 
-    const transformed = await processSegmentsCombined(segments);
+    const transformed = await processSegmentsCombined(chunks);
     const toComment = transformed.filter(
       (t) =>
         t.classification !== "Ignore" && t.transformedText.trim().length > 0,
@@ -434,6 +447,25 @@ export function activate(context: vscode.ExtensionContext) {
       });
       console.log(`[Batch] Created comment: "${commentText.slice(0, 50)}..."`);
     }
+  }
+
+  /**
+   * Process multiple segments in one batch: semantic chunking (with cross-batch tail), then run chunks to comments.
+   */
+  async function processSegmentsBatch(
+    segments: SpeakerSegment[],
+  ): Promise<void> {
+    if (segments.length === 0) {
+      return;
+    }
+    const result = await chunkTranscript(segments, {
+      previousTail: semanticChunkingTail,
+    });
+    semanticChunkingTail = result.pendingTail;
+    if (result.chunks.length === 0) {
+      return;
+    }
+    await processChunksToComments(result.chunks);
   }
 
   /**
