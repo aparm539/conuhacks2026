@@ -101,7 +101,8 @@
     "pretest": "pnpm run compile && pnpm run lint",
     "lint": "eslint src",
     "test": "vscode-test",
-    "format": "prettier --write \"**/*.{ts,tsx,json,css,md,mdx,yaml,yml}\""
+    "format": "prettier --write \"**/*.{ts,tsx,json,css,md,mdx,yaml,yml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,json,css,md,mdx,yaml,yml}\""
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
