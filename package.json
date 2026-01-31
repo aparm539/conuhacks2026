@@ -59,6 +59,11 @@
           "type": "webview",
           "id": "pr-notes.transcriptPanel",
           "name": "Live Transcript"
+        },
+        {
+          "type": "webview",
+          "id": "pr-notes.approvalsPanel",
+          "name": "Pending comments"
         }
       ]
     },
