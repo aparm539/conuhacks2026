@@ -18,22 +18,15 @@ actor AudioProcessor {
     
     // Recording state
     private var recorder: AudioRecorder?
-    private var currentStreamText = ""
     private var lastEmittedEnd: Double = 0
     private var segmentCount = 0
     private var recordingStartTime: Date?
     
-    // Streaming ASR buffer - need enough samples for meaningful transcription
-    private var streamingAsrBuffer: [Float] = []
-    private let minAsrSamples: Int = 24000  // 1.5 seconds at 16kHz - FluidAudio needs this much
-    private var lastAsrTime: Double = 0
-    private let asrInterval: Double = 1.0  // Run ASR every 1 second
-    
-    // Pause detection settings
-    private let silenceThreshold: Float = 0.01  // RMS below this = silence
-    private let pauseDuration: Double = 0.4     // 400ms pause = segment boundary
-    private var silenceStartTime: Double?
-    private var lastSpeechTime: Double = 0
+    // Batching: accumulate 15 seconds of audio before running ASR
+    private var batchBuffer: [Float] = []
+    private let batchDurationSeconds: Double = 15.0
+    private let batchSamples: Int = 240_000  // 15 * 16000 at 16kHz
+    private let minAsrSamples: Int = 24000    // Minimum for ASR (1.5s) - used for partial batch on stop
     
     // Track last known speaker from diarization
     private var currentSpeakerId: Int = 0
@@ -147,16 +140,12 @@ actor AudioProcessor {
         
         // Reset state for new recording
         sampleBuffer.removeAll()
-        streamingAsrBuffer.removeAll()
+        batchBuffer.removeAll()
         collectedSegments.removeAll()
         totalSpeakers = 0
-        currentStreamText = ""
         lastEmittedEnd = 0
         segmentCount = 0
         recordingStartTime = Date()
-        silenceStartTime = nil
-        lastSpeechTime = 0
-        lastAsrTime = 0
         currentSpeakerId = 0
         
         if recorder == nil {
@@ -172,176 +161,96 @@ actor AudioProcessor {
         }
     }
     
-    /// Stop recording - do final transcription if needed
+    /// Stop recording - process any remaining partial batch, then emit done
     func stopRecording() async {
         recorder?.stopRecording()
         
         let endTime = Date().timeIntervalSince(recordingStartTime ?? Date())
         
-        // Emit any remaining pending text as final segment
-        if !currentStreamText.trimmingCharacters(in: .whitespaces).isEmpty {
-            emit(SegmentMessage(
-                speakerId: currentSpeakerId,
-                text: currentStreamText.trimmingCharacters(in: .whitespaces),
-                start: lastEmittedEnd,
-                end: endTime,
-                isFinal: true
-            ))
-            segmentCount += 1
-        }
-        
-        // If no segments were produced during streaming, do a final transcription
-        // of the full accumulated audio buffer
-        if segmentCount == 0 && !sampleBuffer.isEmpty {
-            let totalSamples = sampleBuffer.count
-            let totalDurationSecs = Float(totalSamples) / sampleRate
-            emitDebug("No streaming segments produced. Running final ASR on \(totalSamples) samples (\(String(format: "%.2f", totalDurationSecs))s)")
+        // Process remaining partial batch (whatever is left in batchBuffer)
+        if !batchBuffer.isEmpty && batchBuffer.count >= minAsrSamples, let asrManager = asrManager {
+            let samplesToProcess = batchBuffer
+            let durationSecs = Double(samplesToProcess.count) / Double(sampleRate)
+            emitDebug("Processing partial batch on stop: \(samplesToProcess.count) samples (\(String(format: "%.2f", durationSecs))s)")
             
             do {
-                if let result = try await asrManager?.transcribe(sampleBuffer, source: .microphone) {
-                    let text = result.text.trimmingCharacters(in: .whitespaces)
-                    emitDebug("Final ASR result: '\(text)' (confidence: \(result.confidence))")
-                    if !text.isEmpty {
-                        emit(SegmentMessage(
-                            speakerId: currentSpeakerId,
-                            text: text,
-                            start: 0,
-                            end: endTime,
-                            isFinal: true
-                        ))
-                        segmentCount += 1
-                    }
-                } else {
-                    emitDebug("ASR manager not available for final transcription")
+                let result = try await asrManager.transcribe(samplesToProcess, source: .microphone)
+                let text = result.text.trimmingCharacters(in: .whitespaces)
+                emitDebug("Partial batch ASR result: '\(text)' (confidence: \(result.confidence))")
+                if !text.isEmpty {
+                    emit(SegmentMessage(
+                        speakerId: currentSpeakerId,
+                        text: text,
+                        start: lastEmittedEnd,
+                        end: endTime,
+                        isFinal: true
+                    ))
+                    segmentCount += 1
                 }
             } catch {
-                emitDebug("Final transcription error: \(error)")
-                emitError("Final transcription failed: \(error.localizedDescription)")
+                emitDebug("Partial batch ASR error: \(error)")
             }
-        } else {
-            emitDebug("Streaming produced \(segmentCount) segments, skipping final ASR")
         }
         
         // Emit summary
-        let totalDuration = endTime
         emit(DoneMessage(
             totalSpeakers: totalSpeakers,
             totalSegments: segmentCount,
-            totalDuration: totalDuration
+            totalDuration: endTime
         ))
         
         // Reset state
         sampleBuffer.removeAll()
-        streamingAsrBuffer.removeAll()
-        currentStreamText = ""
+        batchBuffer.removeAll()
         recordingStartTime = nil
     }
     
-    /// Process an incoming audio chunk in real-time
+    /// Process an incoming audio chunk: accumulate in batch buffer; run ASR every 15 seconds
     private func processStreamingChunk(_ samples: [Float]) async {
-        let chunkTime = Date().timeIntervalSince(recordingStartTime ?? Date())
-        
-        // Accumulate samples for full recording and streaming ASR
+        // Accumulate for full recording and for batching
         sampleBuffer.append(contentsOf: samples)
-        streamingAsrBuffer.append(contentsOf: samples)
+        batchBuffer.append(contentsOf: samples)
         
-        // Feed to audio stream for real-time diarization
+        // Feed to audio stream for real-time diarization (speaker updates)
         do {
             try audioStream?.write(from: samples)
         } catch {
             // Non-fatal, continue processing
         }
         
-        // Check for pause detection first
-        let isPause = detectPause(samples: samples, currentTime: chunkTime)
+        // Run ASR when we have a full 15-second batch
+        guard batchBuffer.count >= batchSamples, let asrManager = asrManager else { return }
         
-        // Only run ASR when we have enough samples
-        // Even on pause, we need minimum samples for ASR to work
-        let hasEnoughSamples = streamingAsrBuffer.count >= minAsrSamples
-        let shouldRunAsr = hasEnoughSamples && (chunkTime - lastAsrTime) >= asrInterval
-        let shouldFlushOnPause = isPause && hasEnoughSamples
+        let batchStart = lastEmittedEnd
+        let batchEnd = batchStart + batchDurationSeconds
         
-        guard shouldRunAsr || shouldFlushOnPause else { return }
-        guard let asrManager = asrManager else {
-            emitDebug("ASR manager not available")
-            return
-        }
+        // Take exactly one batch worth of samples
+        let samplesToProcess = Array(batchBuffer.prefix(batchSamples))
+        batchBuffer.removeFirst(batchSamples)
         
-        // Run ASR on accumulated buffer
-        let samplesToProcess = streamingAsrBuffer
-        let sampleCount = samplesToProcess.count
-        let durationSecs = Float(sampleCount) / sampleRate
-        streamingAsrBuffer.removeAll()
-        lastAsrTime = chunkTime
-        
-        emitDebug("Running streaming ASR on \(sampleCount) samples (\(String(format: "%.2f", durationSecs))s)")
+        emitDebug("Running batch ASR on \(samplesToProcess.count) samples (\(batchDurationSeconds)s)")
         
         do {
             let result = try await asrManager.transcribe(samplesToProcess, source: .microphone)
-            let newText = result.text.trimmingCharacters(in: .whitespaces)
+            let text = result.text.trimmingCharacters(in: .whitespaces)
             
-            emitDebug("ASR result: '\(newText)' (confidence: \(result.confidence))")
+            emitDebug("Batch ASR result: '\(text)' (confidence: \(result.confidence))")
             
-            // Accumulate text
-            if !newText.isEmpty {
-                currentStreamText += (currentStreamText.isEmpty ? "" : " ") + newText
-            }
-            
-            // Emit volatile for UI feedback
-            if !currentStreamText.isEmpty {
-                emit(VolatileMessage(text: currentStreamText))
-            }
-            
-            // If pause detected, emit segment
-            if isPause && !currentStreamText.trimmingCharacters(in: .whitespaces).isEmpty {
+            if !text.isEmpty {
                 emit(SegmentMessage(
                     speakerId: currentSpeakerId,
-                    text: currentStreamText.trimmingCharacters(in: .whitespaces),
-                    start: lastEmittedEnd,
-                    end: chunkTime,
+                    text: text,
+                    start: batchStart,
+                    end: batchEnd,
                     isFinal: true
                 ))
-                
                 segmentCount += 1
-                lastEmittedEnd = chunkTime
-                currentStreamText = ""
-                silenceStartTime = nil  // Reset for next segment
+                lastEmittedEnd = batchEnd
+                emit(VolatileMessage(text: text))
             }
         } catch {
-            emitDebug("Streaming ASR error: \(error)")
+            emitDebug("Batch ASR error: \(error)")
         }
-    }
-    
-    // MARK: - Pause Detection
-    
-    /// Detect if we're in a pause (silence) that indicates segment boundary
-    private func detectPause(samples: [Float], currentTime: Double) -> Bool {
-        let rms = calculateRMS(samples)
-        
-        if rms < silenceThreshold {
-            // Currently silent
-            if silenceStartTime == nil {
-                silenceStartTime = currentTime
-            }
-            
-            // Check if pause is long enough
-            if let start = silenceStartTime, (currentTime - start) >= pauseDuration {
-                return true
-            }
-        } else {
-            // Speech detected - reset silence timer
-            silenceStartTime = nil
-            lastSpeechTime = currentTime
-        }
-        
-        return false
-    }
-    
-    /// Calculate RMS (root mean square) energy of audio samples
-    private func calculateRMS(_ samples: [Float]) -> Float {
-        guard !samples.isEmpty else { return 0 }
-        let sumOfSquares = samples.reduce(0) { $0 + $1 * $1 }
-        return sqrt(sumOfSquares / Float(samples.count))
     }
     
     // MARK: - Private Methods
