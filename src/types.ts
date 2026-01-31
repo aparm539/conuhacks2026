@@ -3,41 +3,46 @@
  */
 
 // Segment classification types
-export type SegmentClassification = 'Ignore' | 'Question' | 'Concern' | 'Suggestion' | 'Style';
+export type SegmentClassification =
+  | "Ignore"
+  | "Question"
+  | "Concern"
+  | "Suggestion"
+  | "Style";
 
 export const VALID_CLASSIFICATIONS: SegmentClassification[] = [
-    'Ignore',
-    'Question',
-    'Concern',
-    'Suggestion',
-    'Style'
+  "Ignore",
+  "Question",
+  "Concern",
+  "Suggestion",
+  "Style",
 ];
 
 export interface SpeakerSegment {
-    speakerTag: number;
-    text: string;
-    startTime: number;
-    endTime: number;
+  speakerTag: number;
+  text: string;
+  startTime: number;
+  endTime: number;
 }
 
 export interface ClassifiedSegment extends SpeakerSegment {
-    classification: SegmentClassification;
+  classification: SegmentClassification;
 }
 
 export interface TransformedSegment extends ClassifiedSegment {
-    transformedText: string;
+  transformedText: string;
 }
 
 export interface CandidateLocation {
-    timestamp: number;
-    file: string;
-    cursorLine: number;
-    visibleRange: [number, number];
-    symbolsInView: string[];
-    codeContext: string;
+  timestamp: number;
+  file: string;
+  cursorLine: number;
+  visibleRange: [number, number];
+  symbolsInView: string[];
+  codeContext: string;
 }
 
 export interface LocationSelection {
-    selectedIndex: number;
-    rationale?: string;
+  selectedIndex: number;
+  rationale?: string;
 }

@@ -44,7 +44,7 @@
         "category": "PR Notes"
       }
     ],
-"viewsContainers": {
+    "viewsContainers": {
       "activitybar": [
         {
           "id": "pr-notes",
@@ -100,7 +100,8 @@
     "watch": "tsc -watch -p ./",
     "pretest": "pnpm run compile && pnpm run lint",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "format": "prettier --write \"**/*.{ts,tsx,json,css,md,mdx,yaml,yml}\""
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -113,6 +114,7 @@
     "typescript-eslint": "^8.52.0"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.21.0"
+    "@google/generative-ai": "^0.21.0",
+    "prettier": "^3.8.1"
   }
 }

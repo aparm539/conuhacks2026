@@ -1,107 +1,107 @@
-import * as vscode from 'vscode';
+import * as vscode from "vscode";
 
 export interface TranscriptEntry {
-    speakerId: number;
-    text: string;
-    startTime: number;
-    endTime: number;
-    isVolatile?: boolean; // true = interim, may change
+  speakerId: number;
+  text: string;
+  startTime: number;
+  endTime: number;
+  isVolatile?: boolean; // true = interim, may change
 }
 
 export class TranscriptPanelProvider implements vscode.WebviewViewProvider {
-    public static readonly viewType = 'pr-notes.transcriptPanel';
-    
-    private _view?: vscode.WebviewView;
-    private _entries: TranscriptEntry[] = [];
-    private _volatileText: string = '';
-    private _isRecording: boolean = false;
-    private _currentSpeaker: number = 0;
+  public static readonly viewType = "pr-notes.transcriptPanel";
 
-    constructor(private readonly _extensionUri: vscode.Uri) {}
+  private _view?: vscode.WebviewView;
+  private _entries: TranscriptEntry[] = [];
+  private _volatileText: string = "";
+  private _isRecording: boolean = false;
+  private _currentSpeaker: number = 0;
 
-    public resolveWebviewView(
-        webviewView: vscode.WebviewView,
-        _context: vscode.WebviewViewResolveContext,
-        _token: vscode.CancellationToken
-    ) {
-        this._view = webviewView;
+  constructor(private readonly _extensionUri: vscode.Uri) {}
 
-        webviewView.webview.options = {
-            enableScripts: true,
-            localResourceRoots: [this._extensionUri]
-        };
+  public resolveWebviewView(
+    webviewView: vscode.WebviewView,
+    _context: vscode.WebviewViewResolveContext,
+    _token: vscode.CancellationToken,
+  ) {
+    this._view = webviewView;
 
-        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [this._extensionUri],
+    };
 
-        // Handle messages from the webview
-        webviewView.webview.onDidReceiveMessage(data => {
-            switch (data.type) {
-                case 'clear':
-                    this.clear();
-                    break;
-            }
-        });
+    webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+
+    // Handle messages from the webview
+    webviewView.webview.onDidReceiveMessage((data) => {
+      switch (data.type) {
+        case "clear":
+          this.clear();
+          break;
+      }
+    });
+  }
+
+  /**
+   * Update recording state
+   */
+  public setRecording(isRecording: boolean) {
+    this._isRecording = isRecording;
+    if (!isRecording) {
+      this._volatileText = "";
     }
+    this._updateView();
+  }
 
-    /**
-     * Update recording state
-     */
-    public setRecording(isRecording: boolean) {
-        this._isRecording = isRecording;
-        if (!isRecording) {
-            this._volatileText = '';
-        }
-        this._updateView();
+  /**
+   * Update volatile (interim) transcription text
+   */
+  public updateVolatile(text: string) {
+    this._volatileText = text;
+    this._updateView();
+  }
+
+  /**
+   * Update current speaker from diarization
+   */
+  public updateCurrentSpeaker(speakerId: number) {
+    this._currentSpeaker = speakerId;
+  }
+
+  /**
+   * Add a final segment
+   */
+  public addSegment(entry: TranscriptEntry) {
+    this._entries.push(entry);
+    this._volatileText = ""; // Clear volatile when we get a final segment
+    this._updateView();
+  }
+
+  /**
+   * Clear all entries
+   */
+  public clear() {
+    this._entries = [];
+    this._volatileText = "";
+    this._currentSpeaker = 0;
+    this._updateView();
+  }
+
+  private _updateView() {
+    if (this._view) {
+      this._view.webview.postMessage({
+        type: "update",
+        entries: this._entries,
+        volatileText: this._volatileText,
+        volatileSpeaker: this._currentSpeaker,
+        isRecording: this._isRecording,
+      });
     }
+  }
 
-    /**
-     * Update volatile (interim) transcription text
-     */
-    public updateVolatile(text: string) {
-        this._volatileText = text;
-        this._updateView();
-    }
-
-    /**
-     * Update current speaker from diarization
-     */
-    public updateCurrentSpeaker(speakerId: number) {
-        this._currentSpeaker = speakerId;
-    }
-
-    /**
-     * Add a final segment
-     */
-    public addSegment(entry: TranscriptEntry) {
-        this._entries.push(entry);
-        this._volatileText = ''; // Clear volatile when we get a final segment
-        this._updateView();
-    }
-
-    /**
-     * Clear all entries
-     */
-    public clear() {
-        this._entries = [];
-        this._volatileText = '';
-        this._currentSpeaker = 0;
-        this._updateView();
-    }
-
-    private _updateView() {
-        if (this._view) {
-            this._view.webview.postMessage({
-                type: 'update',
-                entries: this._entries,
-                volatileText: this._volatileText,
-                volatileSpeaker: this._currentSpeaker,
-                isRecording: this._isRecording
-            });
-        }
-    }
-
-    private _getHtmlForWebview(_webview: vscode.Webview): string {
-        return `<!DOCTYPE html>
+  private _getHtmlForWebview(_webview: vscode.Webview): string {
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -376,5 +376,5 @@ export class TranscriptPanelProvider implements vscode.WebviewViewProvider {
     </script>
 </body>
 </html>`;
-    }
+  }
 }
