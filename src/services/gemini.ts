@@ -16,6 +16,7 @@ import { parseJsonArray } from "../utils/jsonParser";
 
 // Configuration constants
 const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_EMBEDDING_MODEL = "gemini-embedding-001";
 
 // Gemini client (lazily initialized)
 let geminiClient: GoogleGenerativeAI | null = null;
@@ -75,6 +76,25 @@ async function getGeminiClientAsync(): Promise<GoogleGenerativeAI> {
   geminiClient = new GoogleGenerativeAI(apiKey);
   cachedApiKey = apiKey;
   return geminiClient;
+}
+
+/**
+ * Embed multiple text strings using Gemini embedding model (batch).
+ * Used by semantic chunking to compute similarity between transcript units.
+ */
+export async function embedTexts(texts: string[]): Promise<number[][]> {
+  if (texts.length === 0) {
+    return [];
+  }
+  const client = await getGeminiClientAsync();
+  const embedModel = client.getGenerativeModel({
+    model: GEMINI_EMBEDDING_MODEL,
+  });
+  const requests = texts.map((text) => ({
+    content: { role: "user", parts: [{ text }] },
+  }));
+  const result = await embedModel.batchEmbedContents({ requests });
+  return result.embeddings.map((e) => e.values);
 }
 
 /**

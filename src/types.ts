@@ -25,6 +25,20 @@ export interface SpeakerSegment {
   endTime: number;
 }
 
+/** One sentence (or short phrase) with time span; used for semantic chunking */
+export interface TranscriptUnit {
+  text: string;
+  startTime: number;
+  endTime: number;
+  speakerTag: number;
+}
+
+/** Pending tail between batches: last chunk's units + embeddings for cross-batch merging */
+export interface SemanticChunkingTail {
+  units: TranscriptUnit[];
+  embeddings: number[][];
+}
+
 export interface ClassifiedSegment extends SpeakerSegment {
   classification: SegmentClassification;
 }

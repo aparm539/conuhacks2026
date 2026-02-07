@@ -18,17 +18,10 @@ actor AudioProcessor {
     
     // Recording state
     private var recorder: AudioRecorder?
-    private var lastEmittedEnd: Double = 0
     private var segmentCount = 0
     private var recordingStartTime: Date?
     
-    // Batching: accumulate 15 seconds of audio before running ASR
-    private var batchBuffer: [Float] = []
-    private let batchDurationSeconds: Double = 15.0
-    private let batchSamples: Int = 240_000  // 15 * 16000 at 16kHz
-    private let minAsrSamples: Int = 24000    // Minimum for ASR (1.5s) - used for partial batch on stop
-    
-    // Track last known speaker from diarization
+    // Track last known speaker from diarization (used when emitting segments after stop)
     private var currentSpeakerId: Int = 0
     
     /// Initialize FluidAudio models
@@ -131,19 +124,20 @@ actor AudioProcessor {
     
     // MARK: - Real-Time Recording
     
-    /// Start recording and streaming audio processing
+    /// Start recording; audio is accumulated only until stop (then batch diarization + ASR)
     func startRecording(deviceId: String? = nil) async throws {
         // Ensure models are initialized first
         if !isInitialized {
             try await initialize()
         }
         
+        // Reset diarizer state so each recording gets fresh speaker labels (Option B session reset)
+        diarizer?.speakerManager.reset()
+        
         // Reset state for new recording
         sampleBuffer.removeAll()
-        batchBuffer.removeAll()
         collectedSegments.removeAll()
         totalSpeakers = 0
-        lastEmittedEnd = 0
         segmentCount = 0
         recordingStartTime = Date()
         currentSpeakerId = 0
@@ -152,105 +146,89 @@ actor AudioProcessor {
             recorder = AudioRecorder()
         }
         
-        // Start recording with streaming callback
+        // Start recording; callback only accumulates samples (no ASR or diarization during recording)
         try recorder?.startRecording(deviceId: deviceId) { [weak self] samples in
             guard let self = self else { return }
             Task {
-                await self.processStreamingChunk(samples)
+                await self.appendRecordingSamples(samples)
             }
         }
     }
     
-    /// Stop recording - process any remaining partial batch, then emit done
+    /// Accumulate samples during recording (no ASR or diarization until stop)
+    private func appendRecordingSamples(_ samples: [Float]) async {
+        sampleBuffer.append(contentsOf: samples)
+    }
+    
+    /// Stop recording - run batch diarization and ASR on full buffer, then emit segments and done
     func stopRecording() async {
         recorder?.stopRecording()
         
         let endTime = Date().timeIntervalSince(recordingStartTime ?? Date())
         
-        // Process remaining partial batch (whatever is left in batchBuffer)
-        if !batchBuffer.isEmpty && batchBuffer.count >= minAsrSamples, let asrManager = asrManager {
-            let samplesToProcess = batchBuffer
-            let durationSecs = Double(samplesToProcess.count) / Double(sampleRate)
-            emitDebug("Processing partial batch on stop: \(samplesToProcess.count) samples (\(String(format: "%.2f", durationSecs))s)")
-            
+        guard !sampleBuffer.isEmpty else {
+            emit(DoneMessage(totalSpeakers: 0, totalSegments: 0, totalDuration: endTime))
+            recordingStartTime = nil
+            return
+        }
+        
+        emit(ProgressMessage(stage: "diarization", message: "Detecting speakers...", percent: nil))
+        
+        // Batch diarization on full buffer (Option B)
+        var diarizationSegments: [(speakerId: Int, start: Double, end: Double)] = []
+        if let diarizer = diarizer {
             do {
-                let result = try await asrManager.transcribe(samplesToProcess, source: .microphone)
-                let text = result.text.trimmingCharacters(in: .whitespaces)
-                emitDebug("Partial batch ASR result: '\(text)' (confidence: \(result.confidence))")
-                if !text.isEmpty {
-                    emit(SegmentMessage(
-                        speakerId: currentSpeakerId,
-                        text: text,
-                        start: lastEmittedEnd,
-                        end: endTime,
-                        isFinal: true
-                    ))
-                    segmentCount += 1
+                let result = try diarizer.performCompleteDiarization(sampleBuffer)
+                totalSpeakers = max(totalSpeakers, diarizer.speakerManager.speakerCount)
+                for seg in result.segments {
+                    let id = extractSpeakerId(from: seg.speakerId)
+                    diarizationSegments.append((id, Double(seg.startTimeSeconds), Double(seg.endTimeSeconds)))
                 }
             } catch {
-                emitDebug("Partial batch ASR error: \(error)")
+                emitDebug("Diarization failed, using single speaker: \(error)")
             }
         }
         
-        // Emit summary
-        emit(DoneMessage(
-            totalSpeakers: totalSpeakers,
-            totalSegments: segmentCount,
-            totalDuration: endTime
-        ))
+        emit(ProgressMessage(stage: "asr", message: "Transcribing...", percent: nil))
         
-        // Reset state
-        sampleBuffer.removeAll()
-        batchBuffer.removeAll()
-        recordingStartTime = nil
-    }
-    
-    /// Process an incoming audio chunk: accumulate in batch buffer; run ASR every 15 seconds
-    private func processStreamingChunk(_ samples: [Float]) async {
-        // Accumulate for full recording and for batching
-        sampleBuffer.append(contentsOf: samples)
-        batchBuffer.append(contentsOf: samples)
-        
-        // Feed to audio stream for real-time diarization (speaker updates)
-        do {
-            try audioStream?.write(from: samples)
-        } catch {
-            // Non-fatal, continue processing
+        // ASR on full buffer
+        var fullText = ""
+        if let asrManager = asrManager {
+            do {
+                let result = try await asrManager.transcribe(sampleBuffer, source: .microphone)
+                fullText = result.text.trimmingCharacters(in: .whitespaces)
+            } catch {
+                emitError("ASR failed: \(error.localizedDescription)")
+            }
         }
         
-        // Run ASR when we have a full 15-second batch
-        guard batchBuffer.count >= batchSamples, let asrManager = asrManager else { return }
-        
-        let batchStart = lastEmittedEnd
-        let batchEnd = batchStart + batchDurationSeconds
-        
-        // Take exactly one batch worth of samples
-        let samplesToProcess = Array(batchBuffer.prefix(batchSamples))
-        batchBuffer.removeFirst(batchSamples)
-        
-        emitDebug("Running batch ASR on \(samplesToProcess.count) samples (\(batchDurationSeconds)s)")
-        
-        do {
-            let result = try await asrManager.transcribe(samplesToProcess, source: .microphone)
-            let text = result.text.trimmingCharacters(in: .whitespaces)
-            
-            emitDebug("Batch ASR result: '\(text)' (confidence: \(result.confidence))")
-            
-            if !text.isEmpty {
-                emit(SegmentMessage(
-                    speakerId: currentSpeakerId,
-                    text: text,
-                    start: batchStart,
-                    end: batchEnd,
-                    isFinal: true
-                ))
+        // Emit segments: one per speaker span (merge consecutive same-speaker diarization segments)
+        if diarizationSegments.isEmpty || fullText.isEmpty {
+            if !fullText.isEmpty {
+                emit(SegmentMessage(speakerId: 0, text: fullText, start: 0, end: endTime, isFinal: true))
+                segmentCount = 1
+            }
+        } else {
+            var i = 0
+            while i < diarizationSegments.count {
+                let speakerId = diarizationSegments[i].speakerId
+                let spanStart = diarizationSegments[i].start
+                var spanEnd = diarizationSegments[i].end
+                while i + 1 < diarizationSegments.count && diarizationSegments[i + 1].speakerId == speakerId {
+                    i += 1
+                    spanEnd = diarizationSegments[i].end
+                }
+                emit(SpeakerMessage(id: speakerId, start: spanStart, end: spanEnd))
+                emit(SegmentMessage(speakerId: speakerId, text: fullText, start: spanStart, end: spanEnd, isFinal: true))
                 segmentCount += 1
-                lastEmittedEnd = batchEnd
-                emit(VolatileMessage(text: text))
+                i += 1
             }
-        } catch {
-            emitDebug("Batch ASR error: \(error)")
         }
+        
+        emit(DoneMessage(totalSpeakers: totalSpeakers, totalSegments: segmentCount, totalDuration: endTime))
+        
+        sampleBuffer.removeAll()
+        recordingStartTime = nil
     }
     
     // MARK: - Private Methods

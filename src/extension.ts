@@ -23,7 +23,11 @@ import {
 } from "./audioDeviceManager";
 import { ContextCollector } from "./contextCollector";
 import { findCommentLocationsBatch } from "./speechAlignment";
-import type { SpeakerSegment, TransformedSegment } from "./types";
+import type {
+  SpeakerSegment,
+  TransformedSegment,
+  SemanticChunkingTail,
+} from "./types";
 import { getPrContext } from "./githubPrContext";
 import {
   postReviewComments,
@@ -35,7 +39,12 @@ import {
   initializeGeminiService,
   resetGeminiClient,
 } from "./services/gemini";
+import { chunkTranscript } from "./semanticChunking";
 import { TranscriptPanelProvider } from "./transcriptPanel";
+import {
+  ApprovalsPanelProvider,
+  type PendingCommentDisplay,
+} from "./approvalsPanel";
 
 let transcriptPanel: TranscriptPanelProvider;
 
@@ -69,6 +78,9 @@ export function activate(context: vscode.ExtensionContext) {
       transcriptPanel,
     ),
   );
+
+  // Approvals panel will be created after postPendingGitHubComments and discard are defined
+  let approvalsPanel: ApprovalsPanelProvider;
 
   // Create status bar item
   const statusBarItem = createStatusBarItem();
@@ -114,12 +126,19 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Real-time processing state
   let processedSegmentCount = 0;
-  let pendingGitHubComments: ReviewCommentInput[] = [];
+  interface PendingCommentEntry {
+    input: ReviewCommentInput;
+    thread: vscode.CommentThread;
+  }
+  let pendingCommentEntries: PendingCommentEntry[] = [];
 
   // Batch processing: collect segments and process with Gemini + comment location in one go (500ms debounce)
   const SEGMENT_BATCH_DEBOUNCE_MS = 500;
   let pendingSegmentsQueue: SpeakerSegment[] = [];
   let segmentBatchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Cross-batch semantic chunking: last chunk's units + embeddings, cleared on recording start
+  let semanticChunkingTail: SemanticChunkingTail | null = null;
 
   // Model download timeout: 15 minutes for first-run downloads (~650MB)
   const MODEL_DOWNLOAD_TIMEOUT_MS = 900000;
@@ -242,7 +261,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
         break;
       case "progress":
-        // Model download progress
+        // Model download progress or post-stop processing (Detecting speakers... / Transcribing...)
         console.log(
           `[FluidHelper] Progress: ${msg.stage} - ${msg.message} (${msg.percent ?? "..."}%)`,
         );
@@ -260,18 +279,31 @@ export function activate(context: vscode.ExtensionContext) {
             increment: msg.percent ? 5 : 0,
           });
         }
+        // Show "Processing..." in transcript panel when processing after stop (not during initial model download)
+        if (
+          !isRecording &&
+          (msg.message === "Detecting speakers..." ||
+            msg.message === "Transcribing...")
+        ) {
+          transcriptPanel.setProcessing(true);
+        }
         break;
       case "recordingStatus":
         if (msg.status === "started") {
           console.log("[FluidHelper] Recording started");
           processedSegmentCount = 0;
-          pendingGitHubComments = [];
+          for (const entry of pendingCommentEntries) {
+            entry.thread.dispose();
+          }
+          pendingCommentEntries = [];
           pendingSegmentsQueue = [];
+          semanticChunkingTail = null;
           if (segmentBatchDebounceTimer !== null) {
             clearTimeout(segmentBatchDebounceTimer);
             segmentBatchDebounceTimer = null;
           }
           transcriptPanel.clear();
+          transcriptPanel.setProcessing(false);
           transcriptPanel.setRecording(true);
         } else if (msg.status === "stopped") {
           console.log("[FluidHelper] Recording stopped");
@@ -284,10 +316,6 @@ export function activate(context: vscode.ExtensionContext) {
             console.error("Error refreshing status bar:", err),
           );
         }
-        break;
-      case "volatile":
-        // Real-time interim transcription - show in transcript panel only
-        transcriptPanel.updateVolatile(String(msg.text));
         break;
       case "confirmed":
         console.log(
@@ -332,6 +360,7 @@ export function activate(context: vscode.ExtensionContext) {
           `[FluidHelper] Done: ${msg.totalSegments} segments, ${msg.totalSpeakers} speakers`,
         );
         isRecording = false;
+        transcriptPanel.setProcessing(false);
         refreshStatusBar().catch((err) =>
           console.error("Error refreshing status bar:", err),
         );
@@ -340,16 +369,24 @@ export function activate(context: vscode.ExtensionContext) {
           segmentBatchDebounceTimer = null;
         }
         flushPendingSegments()
-          .then(() => {
-            postPendingGitHubComments().catch((err) => {
-              console.error("Failed to post GitHub comments:", err);
-            });
+          .then(async () => {
+            if (semanticChunkingTail !== null) {
+              const tailResult = await chunkTranscript([], {
+                previousTail: semanticChunkingTail,
+                flushTail: true,
+              });
+              semanticChunkingTail = null;
+              if (tailResult.chunks.length > 0) {
+                await processChunksToComments(tailResult.chunks);
+              }
+            }
+            if (pendingCommentEntries.length > 0) {
+              approvalsPanel.refresh();
+              approvalsPanel.show();
+            }
           })
           .catch((err) => {
             console.error("Failed to flush pending segments:", err);
-            postPendingGitHubComments().catch((e) =>
-              console.error("Failed to post GitHub comments:", e),
-            );
           });
 
         vscode.window.showInformationMessage(
@@ -385,12 +422,12 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   /**
-   * Process multiple segments in one batch: Gemini classify+transform, then find locations and create comments
+   * Run chunks through Gemini classify+transform, find locations, create comment threads and pending GitHub comments.
    */
-  async function processSegmentsBatch(
-    segments: SpeakerSegment[],
+  async function processChunksToComments(
+    chunks: SpeakerSegment[],
   ): Promise<void> {
-    if (segments.length === 0) {
+    if (chunks.length === 0) {
       return;
     }
     const contexts = contextCollector.getCurrentContext();
@@ -401,7 +438,7 @@ export function activate(context: vscode.ExtensionContext) {
     const document = editor.document;
     const currentFile = getRepositoryRelativePath(document.uri) ?? "";
 
-    const transformed = await processSegmentsCombined(segments);
+    const transformed = await processSegmentsCombined(chunks);
     const toComment = transformed.filter(
       (t) =>
         t.classification !== "Ignore" && t.transformedText.trim().length > 0,
@@ -420,27 +457,56 @@ export function activate(context: vscode.ExtensionContext) {
       const transformedSegment = toComment[i];
       const commentText = transformedSegment.transformedText;
       const range = ranges[i];
-      commentController.createCommentThread(document.uri, range, [
-        {
-          body: new vscode.MarkdownString(commentText),
-          mode: vscode.CommentMode.Preview,
-          author: { name: "PR Notes" },
+      const thread = commentController.createCommentThread(
+        document.uri,
+        range,
+        [
+          {
+            body: new vscode.MarkdownString(commentText),
+            mode: vscode.CommentMode.Preview,
+            author: { name: "PR Notes" },
+          },
+        ],
+      );
+      pendingCommentEntries.push({
+        input: {
+          path: currentFile,
+          line: range.start.line + 1,
+          body: commentText,
         },
-      ]);
-      pendingGitHubComments.push({
-        path: currentFile,
-        line: range.start.line + 1,
-        body: commentText,
+        thread,
       });
       console.log(`[Batch] Created comment: "${commentText.slice(0, 50)}..."`);
     }
   }
 
   /**
-   * Post accumulated GitHub comments after recording stops
+   * Process multiple segments in one batch: semantic chunking (with cross-batch tail), then run chunks to comments.
    */
-  async function postPendingGitHubComments(): Promise<void> {
-    if (pendingGitHubComments.length === 0) {
+  async function processSegmentsBatch(
+    segments: SpeakerSegment[],
+  ): Promise<void> {
+    if (segments.length === 0) {
+      return;
+    }
+    const result = await chunkTranscript(segments, {
+      previousTail: semanticChunkingTail,
+    });
+    semanticChunkingTail = result.pendingTail;
+    if (result.chunks.length === 0) {
+      return;
+    }
+    await processChunksToComments(result.chunks);
+  }
+
+  /**
+   * Post a subset of pending comments to GitHub (from approvals panel).
+   * After success, removes only the posted entries from pendingCommentEntries and disposes their threads.
+   */
+  async function postPendingGitHubComments(
+    entriesToPost: { entry: PendingCommentEntry; body: string }[],
+  ): Promise<void> {
+    if (entriesToPost.length === 0) {
       return;
     }
 
@@ -449,39 +515,122 @@ export function activate(context: vscode.ExtensionContext) {
         .getConfiguration("pr-notes")
         .get<boolean>("postToGitHub") ?? true;
     if (!postToGitHub) {
-      pendingGitHubComments = [];
+      vscode.window.showInformationMessage(
+        "Posting to GitHub is disabled in settings.",
+      );
       return;
     }
 
     const session = await getSession(false);
     if (!session) {
-      pendingGitHubComments = [];
+      vscode.window.showWarningMessage("Sign in with GitHub to post comments.");
       return;
     }
 
     const prContext = await getPrContext(session.accessToken);
     if (!prContext) {
-      pendingGitHubComments = [];
+      vscode.window.showWarningMessage(
+        "Could not resolve PR context (owner, repo, pull number). Check you're on a PR branch or set overrides.",
+      );
       return;
     }
 
+    const comments: ReviewCommentInput[] = entriesToPost.map(
+      ({ entry, body }) => ({
+        path: entry.input.path,
+        line: entry.input.line,
+        body,
+      }),
+    );
     const result = await postReviewComments(
-      pendingGitHubComments,
+      comments,
       prContext,
       session.accessToken,
     );
     if (result.success) {
+      const postedSet = new Set(entriesToPost.map(({ entry }) => entry));
+      for (let i = pendingCommentEntries.length - 1; i >= 0; i--) {
+        if (postedSet.has(pendingCommentEntries[i])) {
+          pendingCommentEntries[i].thread.dispose();
+          pendingCommentEntries.splice(i, 1);
+        }
+      }
       vscode.window.showInformationMessage(
-        `Posted ${pendingGitHubComments.length} comment(s) to GitHub`,
+        `Posted ${comments.length} comment(s) to GitHub`,
       );
+      approvalsPanel.refresh();
     } else {
       vscode.window.showErrorMessage(
         `Failed to post to GitHub: ${result.error}`,
       );
     }
-
-    pendingGitHubComments = [];
   }
+
+  function handleDiscardPendingComments(): void {
+    for (const entry of pendingCommentEntries) {
+      try {
+        entry.thread.dispose();
+      } catch {
+        // Thread may already be disposed (e.g. user unchecked it)
+      }
+    }
+    pendingCommentEntries = [];
+    approvalsPanel.refresh();
+  }
+
+  const getPendingEntriesForPanel = (): PendingCommentDisplay[] =>
+    pendingCommentEntries.map((e, i) => ({
+      index: i,
+      path: e.input.path,
+      line: e.input.line,
+      body: e.input.body,
+    }));
+
+  approvalsPanel = new ApprovalsPanelProvider(context.extensionUri, {
+    getPendingEntries: getPendingEntriesForPanel,
+    onPostToGitHub: async (
+      selectedIndices: number[],
+      bodiesByIndex: Record<number, string>,
+    ) => {
+      const entriesToPost = selectedIndices.map((i) => ({
+        entry: pendingCommentEntries[i],
+        body: bodiesByIndex[i] ?? pendingCommentEntries[i].input.body,
+      }));
+      await postPendingGitHubComments(entriesToPost);
+    },
+    onDiscard: handleDiscardPendingComments,
+    onBodyChanged(index: number, body: string) {
+      const entry = pendingCommentEntries[index];
+      if (!entry) {
+        return;
+      }
+      entry.input.body = body;
+      const thread = entry.thread as vscode.CommentThread & {
+        comments: vscode.Comment[];
+      };
+      thread.comments = [
+        {
+          body: new vscode.MarkdownString(body),
+          mode: vscode.CommentMode.Preview,
+          author: { name: "PR Notes" },
+        },
+      ];
+    },
+    onCommentUnselected(index: number) {
+      const entry = pendingCommentEntries[index];
+      if (!entry) {
+        return;
+      }
+      entry.thread.dispose();
+      // Keep entry in pendingCommentEntries so it stays in the approvals UI (unchecked)
+    },
+  });
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      ApprovalsPanelProvider.viewType,
+      approvalsPanel,
+    ),
+  );
 
   function handleStartRecording() {
     if (isRecording) {

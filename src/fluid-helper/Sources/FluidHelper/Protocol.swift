@@ -71,11 +71,6 @@ struct RecordingStatusMessage: Encodable {
     }
 }
 
-struct VolatileMessage: Encodable {
-    let type = "volatile"
-    let text: String
-}
-
 struct ConfirmedMessage: Encodable {
     let type = "confirmed"
     let text: String

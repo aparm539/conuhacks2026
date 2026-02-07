@@ -65,10 +65,8 @@ export class ContextCollector {
   stopRecording(): RecordingContext[] {
     this.eventDisposables.forEach((disposable) => disposable.dispose());
     this.eventDisposables = [];
-
-    const snapshots = [...this.contextSnapshots];
-    this.clear();
-    return snapshots;
+    this.recordingStartTime = null;
+    return [...this.contextSnapshots];
   }
 
   /**
