@@ -70,7 +70,8 @@ flowchart LR
 - **[src/contextCollector.ts](src/contextCollector.ts)** — While recording is active:
   - Subscribes to `onDidChangeActiveTextEditor`, `onDidChangeTextEditorSelection`, and `onDidChangeTextEditorVisibleRanges`.
   - On each event, appends a **RecordingContext** snapshot: `timestamp` (seconds since recording start), `file` (repo-relative path), `cursorLine`, `visibleRange`, and `symbolsInView` (document symbols overlapping the visible range).
-  - Snapshots are consumed later by speech alignment to pick the best code location for each comment.
+  - When the user stops recording, context collection stops (listeners are disposed) but the snapshots are **not** cleared; they remain in the collector until the next recording start. Post-stop processing (flush, tail flush, comment location selection) therefore still has access to them via `getCurrentContext()`.
+  - Snapshots are consumed by speech alignment to pick the best code location for each comment.
 
 ### Fluid helper protocol
 
@@ -106,6 +107,7 @@ flowchart LR
 ## 6. After recording stops
 
 - Fluid helper runs batch diarization and ASR on the accumulated buffer, then sends **`segment`** (one or more, with speaker attribution) and **`done`** (with totalSegments, totalSpeakers). It may send **`progress`** first (e.g. "Detecting speakers...", "Transcribing..."); the extension shows "Processing..." in the transcript panel until `done`.
+- Context snapshots collected during the recording are still available from the context collector (see **Context collection**); `getCurrentContext()` is used when processing segments and the tail to align comments to code.
 - Extension:
   1. Clears the segment debounce timer, sets `isRecording = false`, clears transcript panel "Processing..." state, refreshes status bar.
   2. **`flushPendingSegments()`** to process any remaining queue (updates semantic chunking tail).
