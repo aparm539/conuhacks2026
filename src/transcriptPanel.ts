@@ -5,7 +5,6 @@ export interface TranscriptEntry {
   text: string;
   startTime: number;
   endTime: number;
-  isVolatile?: boolean; // true = interim, may change
 }
 
 export class TranscriptPanelProvider implements vscode.WebviewViewProvider {
@@ -13,8 +12,8 @@ export class TranscriptPanelProvider implements vscode.WebviewViewProvider {
 
   private _view?: vscode.WebviewView;
   private _entries: TranscriptEntry[] = [];
-  private _volatileText: string = "";
   private _isRecording: boolean = false;
+  private _isProcessing: boolean = false;
   private _currentSpeaker: number = 0;
 
   constructor(private readonly _extensionUri: vscode.Uri) {}
@@ -48,17 +47,14 @@ export class TranscriptPanelProvider implements vscode.WebviewViewProvider {
    */
   public setRecording(isRecording: boolean) {
     this._isRecording = isRecording;
-    if (!isRecording) {
-      this._volatileText = "";
-    }
     this._updateView();
   }
 
   /**
-   * Update volatile (interim) transcription text
+   * Show "Processing..." state (e.g. after stop while diarization/ASR runs)
    */
-  public updateVolatile(text: string) {
-    this._volatileText = text;
+  public setProcessing(isProcessing: boolean) {
+    this._isProcessing = isProcessing;
     this._updateView();
   }
 
@@ -74,7 +70,6 @@ export class TranscriptPanelProvider implements vscode.WebviewViewProvider {
    */
   public addSegment(entry: TranscriptEntry) {
     this._entries.push(entry);
-    this._volatileText = ""; // Clear volatile when we get a final segment
     this._updateView();
   }
 
@@ -83,7 +78,6 @@ export class TranscriptPanelProvider implements vscode.WebviewViewProvider {
    */
   public clear() {
     this._entries = [];
-    this._volatileText = "";
     this._currentSpeaker = 0;
     this._updateView();
   }
@@ -93,9 +87,8 @@ export class TranscriptPanelProvider implements vscode.WebviewViewProvider {
       this._view.webview.postMessage({
         type: "update",
         entries: this._entries,
-        volatileText: this._volatileText,
-        volatileSpeaker: this._currentSpeaker,
         isRecording: this._isRecording,
+        isProcessing: this._isProcessing,
       });
     }
   }
@@ -180,12 +173,6 @@ export class TranscriptPanelProvider implements vscode.WebviewViewProvider {
             border-radius: 6px;
             background-color: var(--vscode-editor-background);
             border-left: 3px solid var(--vscode-textLink-foreground);
-        }
-        
-        .segment.volatile {
-            opacity: 0.7;
-            border-left-color: var(--vscode-editorWarning-foreground);
-            font-style: italic;
         }
         
         .segment-header {
@@ -293,21 +280,18 @@ export class TranscriptPanelProvider implements vscode.WebviewViewProvider {
             return colors[id % colors.length];
         }
         
-        function renderSegment(entry, isVolatile = false) {
+        function renderSegment(entry) {
             const segment = document.createElement('div');
-            segment.className = 'segment' + (isVolatile ? ' volatile' : '');
-            
-            const speakerLabel = isVolatile ? 'Speaking...' : 'Speaker ' + (entry.speakerId + 1);
-            const timeLabel = isVolatile ? '' : formatTime(entry.startTime) + ' - ' + formatTime(entry.endTime);
-            
+            segment.className = 'segment';
+            const speakerLabel = 'Speaker ' + (entry.speakerId + 1);
+            const timeLabel = formatTime(entry.startTime) + ' - ' + formatTime(entry.endTime);
             segment.innerHTML = \`
                 <div class="segment-header">
                     <span class="speaker-tag \${getSpeakerColor(entry.speakerId)}">\${speakerLabel}</span>
-                    \${timeLabel ? '<span class="timestamp">' + timeLabel + '</span>' : ''}
+                    <span class="timestamp">\${timeLabel}</span>
                 </div>
                 <div class="segment-text">\${escapeHtml(entry.text)}</div>
             \`;
-            
             return segment;
         }
         
@@ -318,13 +302,16 @@ export class TranscriptPanelProvider implements vscode.WebviewViewProvider {
         }
         
         function updateUI(data) {
-            const { entries, volatileText, volatileSpeaker, isRecording } = data;
+            const { entries, isRecording, isProcessing } = data;
             currentEntries = entries;
             
             // Update status
             if (isRecording) {
                 statusDot.classList.add('recording');
                 statusText.textContent = 'Recording';
+            } else if (isProcessing) {
+                statusDot.classList.remove('recording');
+                statusText.textContent = 'Processing...';
             } else {
                 statusDot.classList.remove('recording');
                 statusText.textContent = entries.length > 0 ? entries.length + ' segment(s)' : 'Idle';
@@ -333,26 +320,16 @@ export class TranscriptPanelProvider implements vscode.WebviewViewProvider {
             // Clear and rebuild transcript
             transcriptContainer.innerHTML = '';
             
-            if (entries.length === 0 && !volatileText) {
+            if (entries.length === 0) {
                 transcriptContainer.appendChild(emptyState.cloneNode(true));
                 clearBtn.style.display = 'none';
                 return;
             }
             
-            // Render final segments
+            // Render segments
             entries.forEach(entry => {
                 transcriptContainer.appendChild(renderSegment(entry));
             });
-            
-            // Render volatile text if present
-            if (volatileText && isRecording) {
-                transcriptContainer.appendChild(renderSegment({
-                    speakerId: volatileSpeaker,
-                    text: volatileText,
-                    startTime: 0,
-                    endTime: 0
-                }, true));
-            }
             
             // Show clear button if we have entries
             clearBtn.style.display = entries.length > 0 ? 'block' : 'none';

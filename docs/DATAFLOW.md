@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-PR Notes records voice during code review, transcribes and diarizes speech via a native helper process (fluid-helper), chunks the transcript by meaning (semantic chunking), classifies and transforms each chunk with the Gemini API, aligns each comment to editor context using timestamps and visible code, and optionally posts them as GitHub PR review comments. Data flows from user actions (status bar, recording) through the Fluid helper (JSON over stdout), the extension’s segment queue, semantic chunking (split → embed → merge), Gemini (classify/transform and location selection), and finally to in-editor comment threads and the GitHub REST API. Each resulting chunk corresponds to one reviewable issue or suggestion and is used to generate one PR comment.
+PR Notes records voice during code review, transcribes and diarizes speech via a native helper process (fluid-helper), chunks the transcript by meaning (semantic chunking), classifies and transforms each chunk with the Gemini API, aligns each comment to editor context using timestamps and visible code, and optionally posts them as GitHub PR review comments. During recording the helper only accumulates audio; transcription and diarization run in one batch after the user stops recording. Data flows from user actions (status bar, recording) through the Fluid helper (JSON over stdout), the extension’s segment queue, semantic chunking (split → embed → merge), Gemini (classify/transform and location selection), and finally to in-editor comment threads and the GitHub REST API. Each resulting chunk corresponds to one reviewable issue or suggestion and is used to generate one PR comment.
 
 ---
 
@@ -34,7 +34,7 @@ flowchart LR
 
 - **User** interacts with the status bar (Record menu) and sees the transcript panel.
 - **Extension** ([src/extension.ts](src/extension.ts)) orchestrates: spawns Fluid helper, collects context, processes segments, posts to GitHub.
-- **FluidHelper** (native binary) handles audio capture, ASR, and diarization; communicates via JSON lines on stdout/stdin.
+- **FluidHelper** (native binary) handles audio capture; during recording it only accumulates audio. After the user stops, it runs batch diarization and ASR on the full buffer and emits segments and `done`. Communicates via JSON lines on stdout/stdin.
 - **ContextCollector**, **GeminiService**, **SpeechAlignment**, and **GitHub** (PR context + post comments) are used by the extension as described below.
 
 ---
@@ -75,12 +75,14 @@ flowchart LR
 ### Fluid helper protocol
 
 - **[src/fluid-helper/Sources/FluidHelper/Protocol.swift](src/fluid-helper/Sources/FluidHelper/Protocol.swift)** defines the JSON message contract.
+- **During recording** the helper only accumulates audio; no `segment` or `speaker` messages are sent until after stop.
+- **After the user stops recording** the helper runs batch diarization on the full buffer, then ASR, then emits all segments and `done`. It may send **`progress`** (e.g. "Detecting speakers...", "Transcribing...") so the extension can show a "Processing..." state.
 - Extension reads **stdout** line-by-line (JSON per line) and dispatches in `handleFluidHelperMessage()`:
-  - **`volatile`** — Interim transcription text → [src/transcriptPanel.ts](src/transcriptPanel.ts) `updateVolatile(text)`.
+  - **`progress`** — Model-download progress or post-stop stage; if message is "Detecting speakers..." or "Transcribing..." and not recording, transcript panel shows "Processing...".
   - **`segment`** (with `isFinal: true`) — Final segment with `speakerId`, `text`, `start`, `end` → build a `SpeakerSegment`, add to transcript panel and push to `pendingSegmentsQueue`; debounce (500 ms) then flush.
-  - **`speaker`** — Current speaker id → transcript panel `updateCurrentSpeaker(id)`.
+  - **`speaker`** — Speaker id for a segment → transcript panel `updateCurrentSpeaker(id)`.
   - **`recordingStatus`** — `started` / `stopped` / `error` → transcript panel recording state and status bar; on `started`, clear transcript and reset segment/comment queues.
-  - **`done`** — Recording finished; extension flushes pending segments, then posts pending GitHub comments (see below).
+  - **`done`** — Recording finished; extension clears processing state, flushes pending segments, then posts pending GitHub comments (see below).
   - **`error`** — Show error message to the user.
 
 ---
@@ -103,9 +105,9 @@ flowchart LR
 
 ## 6. After recording stops
 
-- Fluid helper sends **`done`** (with totalSegments, totalSpeakers).
+- Fluid helper runs batch diarization and ASR on the accumulated buffer, then sends **`segment`** (one or more, with speaker attribution) and **`done`** (with totalSegments, totalSpeakers). It may send **`progress`** first (e.g. "Detecting speakers...", "Transcribing..."); the extension shows "Processing..." in the transcript panel until `done`.
 - Extension:
-  1. Clears the segment debounce timer, sets `isRecording = false`, refreshes status bar.
+  1. Clears the segment debounce timer, sets `isRecording = false`, clears transcript panel "Processing..." state, refreshes status bar.
   2. **`flushPendingSegments()`** to process any remaining queue (updates semantic chunking tail).
   3. **Flush semantic chunking tail**: If `semanticChunkingTail` is non-null, calls `chunkTranscript([], { previousTail, flushTail: true })` and runs the returned chunk(s) through the pipeline (Gemini, locations, comments), then clears the tail.
   4. **`postPendingGitHubComments()`**:

@@ -257,7 +257,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
         break;
       case "progress":
-        // Model download progress
+        // Model download progress or post-stop processing (Detecting speakers... / Transcribing...)
         console.log(
           `[FluidHelper] Progress: ${msg.stage} - ${msg.message} (${msg.percent ?? "..."}%)`,
         );
@@ -275,6 +275,13 @@ export function activate(context: vscode.ExtensionContext) {
             increment: msg.percent ? 5 : 0,
           });
         }
+        // Show "Processing..." in transcript panel when processing after stop (not during initial model download)
+        if (
+          !isRecording &&
+          (msg.message === "Detecting speakers..." || msg.message === "Transcribing...")
+        ) {
+          transcriptPanel.setProcessing(true);
+        }
         break;
       case "recordingStatus":
         if (msg.status === "started") {
@@ -291,6 +298,7 @@ export function activate(context: vscode.ExtensionContext) {
             segmentBatchDebounceTimer = null;
           }
           transcriptPanel.clear();
+          transcriptPanel.setProcessing(false);
           transcriptPanel.setRecording(true);
         } else if (msg.status === "stopped") {
           console.log("[FluidHelper] Recording stopped");
@@ -303,10 +311,6 @@ export function activate(context: vscode.ExtensionContext) {
             console.error("Error refreshing status bar:", err),
           );
         }
-        break;
-      case "volatile":
-        // Real-time interim transcription - show in transcript panel only
-        transcriptPanel.updateVolatile(String(msg.text));
         break;
       case "confirmed":
         console.log(
@@ -351,6 +355,7 @@ export function activate(context: vscode.ExtensionContext) {
           `[FluidHelper] Done: ${msg.totalSegments} segments, ${msg.totalSpeakers} speakers`,
         );
         isRecording = false;
+        transcriptPanel.setProcessing(false);
         refreshStatusBar().catch((err) =>
           console.error("Error refreshing status bar:", err),
         );
