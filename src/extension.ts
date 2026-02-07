@@ -23,7 +23,11 @@ import {
 } from "./audioDeviceManager";
 import { ContextCollector } from "./contextCollector";
 import { findCommentLocationsBatch } from "./speechAlignment";
-import type { SpeakerSegment, TransformedSegment, SemanticChunkingTail } from "./types";
+import type {
+  SpeakerSegment,
+  TransformedSegment,
+  SemanticChunkingTail,
+} from "./types";
 import { getPrContext } from "./githubPrContext";
 import {
   postReviewComments,
@@ -278,7 +282,8 @@ export function activate(context: vscode.ExtensionContext) {
         // Show "Processing..." in transcript panel when processing after stop (not during initial model download)
         if (
           !isRecording &&
-          (msg.message === "Detecting speakers..." || msg.message === "Transcribing...")
+          (msg.message === "Detecting speakers..." ||
+            msg.message === "Transcribing...")
         ) {
           transcriptPanel.setProcessing(true);
         }
@@ -419,7 +424,9 @@ export function activate(context: vscode.ExtensionContext) {
   /**
    * Run chunks through Gemini classify+transform, find locations, create comment threads and pending GitHub comments.
    */
-  async function processChunksToComments(chunks: SpeakerSegment[]): Promise<void> {
+  async function processChunksToComments(
+    chunks: SpeakerSegment[],
+  ): Promise<void> {
     if (chunks.length === 0) {
       return;
     }
@@ -516,9 +523,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     const session = await getSession(false);
     if (!session) {
-      vscode.window.showWarningMessage(
-        "Sign in with GitHub to post comments.",
-      );
+      vscode.window.showWarningMessage("Sign in with GitHub to post comments.");
       return;
     }
 
@@ -596,7 +601,9 @@ export function activate(context: vscode.ExtensionContext) {
     onDiscard: handleDiscardPendingComments,
     onBodyChanged(index: number, body: string) {
       const entry = pendingCommentEntries[index];
-      if (!entry) return;
+      if (!entry) {
+        return;
+      }
       entry.input.body = body;
       const thread = entry.thread as vscode.CommentThread & {
         comments: vscode.Comment[];
@@ -611,7 +618,9 @@ export function activate(context: vscode.ExtensionContext) {
     },
     onCommentUnselected(index: number) {
       const entry = pendingCommentEntries[index];
-      if (!entry) return;
+      if (!entry) {
+        return;
+      }
       entry.thread.dispose();
       // Keep entry in pendingCommentEntries so it stays in the approvals UI (unchecked)
     },

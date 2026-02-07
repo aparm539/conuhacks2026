@@ -35,12 +35,12 @@ Semantic chunking sits between the segment queue flush and `processSegmentsCombi
 
 ## Key types and modules
 
-| Item | Location | Description |
-|------|----------|-------------|
-| **TranscriptUnit** | [src/types.ts](src/types.ts) | One sentence/phrase with `text`, `startTime`, `endTime`, `speakerTag`. |
-| **SemanticChunkingTail** | [src/types.ts](src/types.ts) | Pending tail: `units: TranscriptUnit[]`, `embeddings: number[][]`. |
-| **chunkTranscript** | [src/semanticChunking.ts](src/semanticChunking.ts) | Public API: `chunkTranscript(segments, options?)` → `Promise<{ chunks, pendingTail }>`. Options: `previousTail`, `flushTail`, `similarityThreshold`. |
-| **embedTexts** | [src/services/gemini.ts](src/services/gemini.ts) | Embeds an array of strings with `gemini-embedding-001`; used by semantic chunking. |
+| Item                     | Location                                           | Description                                                                                                                                          |
+| ------------------------ | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **TranscriptUnit**       | [src/types.ts](src/types.ts)                       | One sentence/phrase with `text`, `startTime`, `endTime`, `speakerTag`.                                                                               |
+| **SemanticChunkingTail** | [src/types.ts](src/types.ts)                       | Pending tail: `units: TranscriptUnit[]`, `embeddings: number[][]`.                                                                                   |
+| **chunkTranscript**      | [src/semanticChunking.ts](src/semanticChunking.ts) | Public API: `chunkTranscript(segments, options?)` → `Promise<{ chunks, pendingTail }>`. Options: `previousTail`, `flushTail`, `similarityThreshold`. |
+| **embedTexts**           | [src/services/gemini.ts](src/services/gemini.ts)   | Embeds an array of strings with `gemini-embedding-001`; used by semantic chunking.                                                                   |
 
 ---
 

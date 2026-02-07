@@ -26,7 +26,10 @@ function splitSegmentsIntoUnits(segments: SpeakerSegment[]): TranscriptUnit[] {
     if (!text) {
       continue;
     }
-    const parts = text.split(SENTENCE_BOUNDARY).map((s) => s.trim()).filter(Boolean);
+    const parts = text
+      .split(SENTENCE_BOUNDARY)
+      .map((s) => s.trim())
+      .filter(Boolean);
     if (parts.length === 0) {
       continue;
     }
@@ -34,7 +37,10 @@ function splitSegmentsIntoUnits(segments: SpeakerSegment[]): TranscriptUnit[] {
     const totalChars = parts.reduce((sum, p) => sum + p.length, 0) || 1;
     let t = seg.startTime;
     for (const part of parts) {
-      const span = totalChars > 0 ? (part.length / totalChars) * duration : duration / parts.length;
+      const span =
+        totalChars > 0
+          ? (part.length / totalChars) * duration
+          : duration / parts.length;
       units.push({
         text: part,
         startTime: t,
@@ -87,7 +93,14 @@ function mergeUnitsBySimilarity(
   if (units.length === 1) {
     const u = units[0];
     return {
-      chunks: [{ speakerTag: u.speakerTag, text: u.text, startTime: u.startTime, endTime: u.endTime }],
+      chunks: [
+        {
+          speakerTag: u.speakerTag,
+          text: u.text,
+          startTime: u.startTime,
+          endTime: u.endTime,
+        },
+      ],
       lastChunkUnitIndices: [0],
     };
   }
@@ -133,7 +146,10 @@ function tailToSegment(tail: SemanticChunkingTail): SpeakerSegment {
   }
   const first = units[0];
   const last = units[units.length - 1];
-  const text = units.map((u) => u.text).join(" ").trim();
+  const text = units
+    .map((u) => u.text)
+    .join(" ")
+    .trim();
   return {
     speakerTag: first.speakerTag,
     text,
@@ -160,7 +176,8 @@ export async function chunkTranscript(
     flushTail?: boolean;
   },
 ): Promise<ChunkTranscriptResult> {
-  const threshold = options?.similarityThreshold ?? DEFAULT_SIMILARITY_THRESHOLD;
+  const threshold =
+    options?.similarityThreshold ?? DEFAULT_SIMILARITY_THRESHOLD;
   const previousTail = options?.previousTail ?? null;
   const flushTail = options?.flushTail ?? false;
 
@@ -230,7 +247,14 @@ export async function chunkTranscript(
         // fall through to treat as chunk
       }
       return {
-        chunks: [{ speakerTag: u.speakerTag, text: u.text, startTime: u.startTime, endTime: u.endTime }],
+        chunks: [
+          {
+            speakerTag: u.speakerTag,
+            text: u.text,
+            startTime: u.startTime,
+            endTime: u.endTime,
+          },
+        ],
         pendingTail: null,
       };
     }

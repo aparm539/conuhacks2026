@@ -122,18 +122,18 @@ flowchart LR
 
 ## 7. Key types (reference)
 
-| Type | File | Description |
-|------|------|-------------|
-| **SpeakerSegment** | [src/types.ts](src/types.ts) | `speakerTag`, `text`, `startTime`, `endTime` |
-| **TranscriptUnit** | [src/types.ts](src/types.ts) | One sentence/phrase with `text`, `startTime`, `endTime`, `speakerTag` (used in semantic chunking) |
-| **SemanticChunkingTail** | [src/types.ts](src/types.ts) | Pending tail: `units: TranscriptUnit[]`, `embeddings: number[][]` (cross-batch state) |
-| **ClassifiedSegment** | [src/types.ts](src/types.ts) | SpeakerSegment + `classification` |
-| **TransformedSegment** | [src/types.ts](src/types.ts) | ClassifiedSegment + `transformedText` |
-| **CandidateLocation** | [src/types.ts](src/types.ts) | `timestamp`, `file`, `cursorLine`, `visibleRange`, `symbolsInView`, `codeContext` |
-| **LocationSelection** | [src/types.ts](src/types.ts) | `selectedIndex`, optional `rationale` |
-| **RecordingContext** | [src/contextCollector.ts](src/contextCollector.ts) | Same shape as CandidateLocation input: timestamp, file, cursorLine, visibleRange, symbolsInView |
-| **PrContext** | [src/githubPrContext.ts](src/githubPrContext.ts) | `owner`, `repo`, `pullNumber`, `commitId` |
-| **ReviewCommentInput** | [src/githubPrComments.ts](src/githubPrComments.ts) | `path`, `line` (1-based), `body` |
+| Type                     | File                                               | Description                                                                                       |
+| ------------------------ | -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| **SpeakerSegment**       | [src/types.ts](src/types.ts)                       | `speakerTag`, `text`, `startTime`, `endTime`                                                      |
+| **TranscriptUnit**       | [src/types.ts](src/types.ts)                       | One sentence/phrase with `text`, `startTime`, `endTime`, `speakerTag` (used in semantic chunking) |
+| **SemanticChunkingTail** | [src/types.ts](src/types.ts)                       | Pending tail: `units: TranscriptUnit[]`, `embeddings: number[][]` (cross-batch state)             |
+| **ClassifiedSegment**    | [src/types.ts](src/types.ts)                       | SpeakerSegment + `classification`                                                                 |
+| **TransformedSegment**   | [src/types.ts](src/types.ts)                       | ClassifiedSegment + `transformedText`                                                             |
+| **CandidateLocation**    | [src/types.ts](src/types.ts)                       | `timestamp`, `file`, `cursorLine`, `visibleRange`, `symbolsInView`, `codeContext`                 |
+| **LocationSelection**    | [src/types.ts](src/types.ts)                       | `selectedIndex`, optional `rationale`                                                             |
+| **RecordingContext**     | [src/contextCollector.ts](src/contextCollector.ts) | Same shape as CandidateLocation input: timestamp, file, cursorLine, visibleRange, symbolsInView   |
+| **PrContext**            | [src/githubPrContext.ts](src/githubPrContext.ts)   | `owner`, `repo`, `pullNumber`, `commitId`                                                         |
+| **ReviewCommentInput**   | [src/githubPrComments.ts](src/githubPrComments.ts) | `path`, `line` (1-based), `body`                                                                  |
 
 ---
 
